@@ -1,0 +1,24 @@
+{
+  "command": "node",
+  "args": [
+    "H:/AntyGravety/Vectora Canvas/scripts/server.mjs",
+    "--target",
+    "h:/AntyGravety/github",
+    "--entry",
+    "index.html"
+  ],
+  "restart_policy": "always",
+  "display_name": "Vectora Canvas",
+  "description": "Direct-HTML Visual Editor & Live Preview Workspace (Grey Stone + Orange)",
+  "has_web_ui": true,
+  "ui_config": {
+    "display_name": "Vectora Canvas",
+    "views": [
+      {
+        "title": "Vectora Canvas",
+        "path": "/",
+        "entrypoint": "SIDECAR_UI_ENTRYPOINT_AUX_PANE"
+      }
+    ]
+  }
+}
