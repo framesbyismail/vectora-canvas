@@ -377,6 +377,18 @@
             </div>
             <span class="cc-pct-pill" id="topCornerRoundBadge" title="Corner roundness percentage (0% sharp → 100% full round)">0%</span>
           </div>
+
+          <!-- Web Effects Trigger Right Beside Round Corner Control -->
+          <div class="effects-ctrl-bar" id="effectsControlBar">
+            <button type="button" class="fx-bar-btn" id="btnEffectsPopover" title="Web Effects Panel — Drop Shadow, Blur, Outer Glow, Inner Glow, Inner Shadow, Glass Backdrop, Text Glow &amp; Blend Modes">
+              <svg class="fx-ico-svg" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+                <path d="M6.4 3.2c-1.1 0-1.7.7-1.9 1.8L3.7 11c-.2 1.1-.7 1.8-1.6 1.8M2.3 6.8h4.1M9.2 6.8l4.2 5.4M13.4 6.8l-4.2 5.4" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              <span>Effects</span>
+              <span class="fx-count-badge" id="fxActiveCountBadge" hidden>0</span>
+              <svg class="dd-caret" viewBox="0 0 12 12" width="9" height="9" aria-hidden="true"><path d="M3 4.5L6 7.5L9 4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            </button>
+          </div>
         </div>
 
         <div class="ct-right">
@@ -1158,6 +1170,257 @@
       <button type="button" data-vcp-sw="#44403c" style="background:#44403c" title="#44403c"></button>
       <button type="button" data-vcp-sw="#191817" style="background:#191817" title="#191817"></button>
       <button type="button" class="vcp-sw-none" data-vcp-sw="none" title="None / Unfill"></button>
+    </div>
+  </div>
+
+  <!-- WEB EFFECTS PANEL POPOVER (DROP SHADOW, BLUR, OUTER GLOW, INNER GLOW, INNER SHADOW, GLASS, TEXT GLOW, BLEND) -->
+  <div class="vc-effects-popover" id="vcEffectsPopover" hidden role="dialog" aria-label="Web Effects Panel">
+    <div class="vfx-head">
+      <div class="vfx-title-wrap">
+        <svg class="fx-ico-svg accent-ico" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <path d="M6.4 3.2c-1.1 0-1.7.7-1.9 1.8L3.7 11c-.2 1.1-.7 1.8-1.6 1.8M2.3 6.8h4.1M9.2 6.8l4.2 5.4M13.4 6.8l-4.2 5.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="vfx-title">Web Effects</span>
+        <span class="vfx-sel-hint" id="fxTargetLabel">Selected Object</span>
+      </div>
+      <div class="vfx-head-actions">
+        <button type="button" class="mini-btn" id="btnResetEffects" title="Clear all web effects on selected object">Reset</button>
+        <button type="button" class="mini-icon-btn" id="btnCloseEffectsPopover" aria-label="Close Effects Panel">
+          <svg viewBox="0 0 12 12" width="10" height="10"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Quick One-Click Web Effect Presets -->
+    <div class="vfx-presets" id="fxPresetsRow">
+      <button type="button" class="vfx-preset-btn" data-fx-preset="soft-shadow" title="Soft UI Drop Shadow">Soft</button>
+      <button type="button" class="vfx-preset-btn" data-fx-preset="deep-lift" title="Deep Floating Card Shadow">Deep</button>
+      <button type="button" class="vfx-preset-btn" data-fx-preset="outer-glow" title="Warm Orange Outer Glow">Glow</button>
+      <button type="button" class="vfx-preset-btn" data-fx-preset="inner-glow" title="Subtle Luminous Inner Rim">Inner</button>
+      <button type="button" class="vfx-preset-btn" data-fx-preset="frosted-glass" title="Frosted Backdrop Glass Blur">Glass</button>
+      <button type="button" class="vfx-preset-btn" data-fx-preset="text-glow" title="Crisp Text Glow / Shadow">Text</button>
+    </div>
+
+    <div class="vfx-body">
+      <!-- 1. Drop Shadow -->
+      <div class="vfx-card" id="fxCardDropShadow">
+        <label class="vfx-toggle-row">
+          <input type="checkbox" id="fxDsEnable">
+          <span class="vfx-sec-name">Drop Shadow</span>
+        </label>
+        <div class="vfx-grid-4">
+          <div class="scrub-field compact" data-scrub-for="fxDsX" data-step="1" data-min="-200" data-max="200" data-unit="px">
+            <span class="scrub-lbl">X</span>
+            <input type="text" id="fxDsX" class="prop-input" value="0px">
+          </div>
+          <div class="scrub-field compact" data-scrub-for="fxDsY" data-step="1" data-min="-200" data-max="200" data-unit="px">
+            <span class="scrub-lbl">Y</span>
+            <input type="text" id="fxDsY" class="prop-input" value="8px">
+          </div>
+          <div class="scrub-field compact" data-scrub-for="fxDsBlur" data-step="1" data-min="0" data-max="240" data-unit="px">
+            <span class="scrub-lbl">B</span>
+            <input type="text" id="fxDsBlur" class="prop-input" value="20px">
+          </div>
+          <div class="scrub-field compact" data-scrub-for="fxDsSpread" data-step="1" data-min="-100" data-max="120" data-unit="px">
+            <span class="scrub-lbl">S</span>
+            <input type="text" id="fxDsSpread" class="prop-input" value="0px">
+          </div>
+        </div>
+        <div class="vfx-color-row">
+          <label class="color-chip vfx-swatch-chip" title="Drop Shadow Color">
+            <input type="color" id="fxDsColor" value="#000000">
+            <span id="fxDsColorHex">#000000</span>
+          </label>
+          <div class="scrub-field compact vfx-op-field" data-scrub-for="fxDsOpacity" data-step="1" data-min="0" data-max="100" data-unit="%">
+            <span class="scrub-lbl">Op</span>
+            <input type="text" id="fxDsOpacity" class="prop-input" value="55%">
+          </div>
+        </div>
+      </div>
+
+      <!-- 2. Outer Glow -->
+      <div class="vfx-card" id="fxCardOuterGlow">
+        <label class="vfx-toggle-row">
+          <input type="checkbox" id="fxOgEnable">
+          <span class="vfx-sec-name">Outer Glow</span>
+        </label>
+        <div class="vfx-color-row">
+          <label class="color-chip vfx-swatch-chip" title="Outer Glow Color">
+            <input type="color" id="fxOgColor" value="#f97316">
+            <span id="fxOgColorHex">#f97316</span>
+          </label>
+          <div class="scrub-field compact" data-scrub-for="fxOgBlur" data-step="1" data-min="0" data-max="240" data-unit="px">
+            <span class="scrub-lbl">Blur</span>
+            <input type="text" id="fxOgBlur" class="prop-input" value="22px">
+          </div>
+          <div class="scrub-field compact" data-scrub-for="fxOgSpread" data-step="1" data-min="-40" data-max="120" data-unit="px">
+            <span class="scrub-lbl">Sprd</span>
+            <input type="text" id="fxOgSpread" class="prop-input" value="2px">
+          </div>
+          <div class="scrub-field compact" data-scrub-for="fxOgOpacity" data-step="1" data-min="0" data-max="100" data-unit="%">
+            <span class="scrub-lbl">Op</span>
+            <input type="text" id="fxOgOpacity" class="prop-input" value="65%">
+          </div>
+        </div>
+      </div>
+
+      <!-- 3. Inner Glow -->
+      <div class="vfx-card" id="fxCardInnerGlow">
+        <label class="vfx-toggle-row">
+          <input type="checkbox" id="fxIgEnable">
+          <span class="vfx-sec-name">Inner Glow</span>
+        </label>
+        <div class="vfx-color-row">
+          <label class="color-chip vfx-swatch-chip" title="Inner Glow Color">
+            <input type="color" id="fxIgColor" value="#fb923c">
+            <span id="fxIgColorHex">#fb923c</span>
+          </label>
+          <div class="scrub-field compact" data-scrub-for="fxIgBlur" data-step="1" data-min="0" data-max="200" data-unit="px">
+            <span class="scrub-lbl">Blur</span>
+            <input type="text" id="fxIgBlur" class="prop-input" value="16px">
+          </div>
+          <div class="scrub-field compact" data-scrub-for="fxIgSpread" data-step="1" data-min="-40" data-max="100" data-unit="px">
+            <span class="scrub-lbl">Choke</span>
+            <input type="text" id="fxIgSpread" class="prop-input" value="1px">
+          </div>
+          <div class="scrub-field compact" data-scrub-for="fxIgOpacity" data-step="1" data-min="0" data-max="100" data-unit="%">
+            <span class="scrub-lbl">Op</span>
+            <input type="text" id="fxIgOpacity" class="prop-input" value="55%">
+          </div>
+        </div>
+      </div>
+
+      <!-- 4. Inner Shadow -->
+      <div class="vfx-card" id="fxCardInnerShadow">
+        <label class="vfx-toggle-row">
+          <input type="checkbox" id="fxIsEnable">
+          <span class="vfx-sec-name">Inner Shadow</span>
+        </label>
+        <div class="vfx-grid-4">
+          <div class="scrub-field compact" data-scrub-for="fxIsX" data-step="1" data-min="-120" data-max="120" data-unit="px">
+            <span class="scrub-lbl">X</span>
+            <input type="text" id="fxIsX" class="prop-input" value="0px">
+          </div>
+          <div class="scrub-field compact" data-scrub-for="fxIsY" data-step="1" data-min="-120" data-max="120" data-unit="px">
+            <span class="scrub-lbl">Y</span>
+            <input type="text" id="fxIsY" class="prop-input" value="3px">
+          </div>
+          <div class="scrub-field compact" data-scrub-for="fxIsBlur" data-step="1" data-min="0" data-max="160" data-unit="px">
+            <span class="scrub-lbl">B</span>
+            <input type="text" id="fxIsBlur" class="prop-input" value="10px">
+          </div>
+          <div class="scrub-field compact" data-scrub-for="fxIsSpread" data-step="1" data-min="-60" data-max="80" data-unit="px">
+            <span class="scrub-lbl">S</span>
+            <input type="text" id="fxIsSpread" class="prop-input" value="0px">
+          </div>
+        </div>
+        <div class="vfx-color-row">
+          <label class="color-chip vfx-swatch-chip" title="Inner Shadow Color">
+            <input type="color" id="fxIsColor" value="#000000">
+            <span id="fxIsColorHex">#000000</span>
+          </label>
+          <div class="scrub-field compact vfx-op-field" data-scrub-for="fxIsOpacity" data-step="1" data-min="0" data-max="100" data-unit="%">
+            <span class="scrub-lbl">Op</span>
+            <input type="text" id="fxIsOpacity" class="prop-input" value="50%">
+          </div>
+        </div>
+      </div>
+
+      <!-- 5. Layer Blur & Backdrop Glass Blur -->
+      <div class="vfx-card vfx-dual-blur-card">
+        <div class="vfx-split-col">
+          <label class="vfx-toggle-row">
+            <input type="checkbox" id="fxLbEnable">
+            <span class="vfx-sec-name">Layer Blur</span>
+          </label>
+          <div class="scrub-field compact" data-scrub-for="fxLbBlur" data-step="0.5" data-min="0" data-max="120" data-unit="px">
+            <span class="scrub-lbl">Blur</span>
+            <input type="text" id="fxLbBlur" class="prop-input" value="6px">
+          </div>
+        </div>
+        <div class="vfx-split-col">
+          <label class="vfx-toggle-row">
+            <input type="checkbox" id="fxBbEnable">
+            <span class="vfx-sec-name">Backdrop Glass</span>
+          </label>
+          <div class="vfx-inline-pair">
+            <div class="scrub-field compact" data-scrub-for="fxBbBlur" data-step="1" data-min="0" data-max="120" data-unit="px">
+              <span class="scrub-lbl">B</span>
+              <input type="text" id="fxBbBlur" class="prop-input" value="12px">
+            </div>
+            <div class="scrub-field compact" data-scrub-for="fxBbSaturate" data-step="5" data-min="0" data-max="300" data-unit="%">
+              <span class="scrub-lbl">Sat</span>
+              <input type="text" id="fxBbSaturate" class="prop-input" value="140%">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 6. Text Shadow / Text Glow -->
+      <div class="vfx-card" id="fxCardTextShadow">
+        <label class="vfx-toggle-row">
+          <input type="checkbox" id="fxTsEnable">
+          <span class="vfx-sec-name">Text Shadow / Glow</span>
+        </label>
+        <div class="vfx-color-row">
+          <label class="color-chip vfx-swatch-chip" title="Text Shadow / Glow Color">
+            <input type="color" id="fxTsColor" value="#f97316">
+            <span id="fxTsColorHex">#f97316</span>
+          </label>
+          <div class="scrub-field compact" data-scrub-for="fxTsX" data-step="1" data-min="-80" data-max="80" data-unit="px">
+            <span class="scrub-lbl">X</span>
+            <input type="text" id="fxTsX" class="prop-input" value="0px">
+          </div>
+          <div class="scrub-field compact" data-scrub-for="fxTsY" data-step="1" data-min="-80" data-max="80" data-unit="px">
+            <span class="scrub-lbl">Y</span>
+            <input type="text" id="fxTsY" class="prop-input" value="2px">
+          </div>
+          <div class="scrub-field compact" data-scrub-for="fxTsBlur" data-step="1" data-min="0" data-max="120" data-unit="px">
+            <span class="scrub-lbl">B</span>
+            <input type="text" id="fxTsBlur" class="prop-input" value="10px">
+          </div>
+          <div class="scrub-field compact" data-scrub-for="fxTsOpacity" data-step="1" data-min="0" data-max="100" data-unit="%">
+            <span class="scrub-lbl">Op</span>
+            <input type="text" id="fxTsOpacity" class="prop-input" value="75%">
+          </div>
+        </div>
+      </div>
+
+      <!-- 7. Web Blend Mode & Filter Adjustments -->
+      <div class="vfx-card" id="fxCardWebAdjust">
+        <div class="vfx-blend-row">
+          <span class="vfx-sec-name">Blend &amp; Filters</span>
+          <div class="vc-dd vfx-blend-dd" id="ddFxBlend">
+            <button type="button" class="vc-dd-btn compact" id="ddFxBlendBtn" title="CSS mix-blend-mode">
+              <span id="ddFxBlendLabel">normal</span>
+              <svg class="dd-caret" viewBox="0 0 12 12" width="9" height="9"><path d="M3 4.5L6 7.5L9 4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            </button>
+            <div class="vc-dd-menu right-align" id="ddFxBlendMenu" hidden></div>
+          </div>
+        </div>
+        <div class="vfx-grid-5">
+          <div class="scrub-field compact" data-scrub-for="fxWaBright" data-step="1" data-min="0" data-max="300" data-unit="%">
+            <span class="scrub-lbl">Br</span>
+            <input type="text" id="fxWaBright" class="prop-input" value="100%">
+          </div>
+          <div class="scrub-field compact" data-scrub-for="fxWaContrast" data-step="1" data-min="0" data-max="300" data-unit="%">
+            <span class="scrub-lbl">Ct</span>
+            <input type="text" id="fxWaContrast" class="prop-input" value="100%">
+          </div>
+          <div class="scrub-field compact" data-scrub-for="fxWaSaturate" data-step="2" data-min="0" data-max="400" data-unit="%">
+            <span class="scrub-lbl">Sat</span>
+            <input type="text" id="fxWaSaturate" class="prop-input" value="100%">
+          </div>
+          <div class="scrub-field compact" data-scrub-for="fxWaHue" data-step="2" data-min="-180" data-max="180" data-unit="deg">
+            <span class="scrub-lbl">Hue</span>
+            <input type="text" id="fxWaHue" class="prop-input" value="0deg">
+          </div>
+          <div class="scrub-field compact" data-scrub-for="fxWaGray" data-step="2" data-min="0" data-max="100" data-unit="%">
+            <span class="scrub-lbl">Gray</span>
+            <input type="text" id="fxWaGray" class="prop-input" value="0%">
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 

@@ -12,22 +12,26 @@ description: Opens Vectora Canvas — an Adobe Illustrator, Figma & Airship-insp
 
 ---
 
-## 1. Trigger & Auto-Open Rules
+## 1. Trigger & Mandatory Pre-Open Rule Execution
 
 1. **Instant Trigger on `"Vectora"`**: Whenever the user types just **`Vectora`** (or **`Vectora Canvas`**, *"open X in Vectora"*, *"show live preview in Vectora"*), activate this skill immediately.
-2. **Live Preview on Request**: Launch or switch the Vectora Canvas server to the target project folder and open `http://127.0.0.1:4680/` in the browser / side browser pane.
-3. **Antigravity Sidecar Pill**: When running inside Google Antigravity with the Vectora Canvas sidecar installed, include `[Vectora Canvas](sidecar://vectora-canvas/)` alongside `http://127.0.0.1:4680/`.
+2. **Mandatory Pre-Open Rule Enforcement (All Designs)**: Before opening any existing or newly created HTML/CSS/JS project in Vectora Canvas, **always audit and apply Section 2's Vectora Authoring Rules first** (especially Standalone Tight Text, Invisible-Over-Visible Div `8px` Inset, `[data-name]`/`id` labels, `:root` `--primary`/`--secondary`, and Links attributes) while preserving **100% exact visual appearance (`0` pixel change) and 100% runtime functionality**.
+3. **Live Preview on Request**: Launch or switch the Vectora Canvas server on port `4680` to the target project folder and open `http://127.0.0.1:4680/` in the browser / side browser pane.
+4. **Antigravity Sidecar Pill**: When running inside Google Antigravity with the Vectora Canvas sidecar installed, include `[Vectora Canvas](sidecar://vectora-canvas/)` alongside `http://127.0.0.1:4680/`.
 
 ---
 
 ## 2. Mandatory Coding Agent HTML/CSS Authoring Rules for Vectora Canvas
 
-Whenever generating, editing, or preparing HTML/CSS/JS to be used or opened in **Vectora Canvas**, ALWAYS follow these rules (also enforced in `rules/AGENTS.md`):
+Whenever generating, editing, or opening **any** design in **Vectora Canvas**, ALWAYS follow these rules (also enforced in `rules/AGENTS.md`):
 
-1. **Invisible-Over-Visible Div Inset Rule (Critical)**:
+1. **Standalone Tight Text Rule — Zero Text Trapped Inside Invisible Boxes (Critical for All Designs)**:
+   - Every visible text piece must be wrapped in its own standalone semantic text element (`<span>`, `<label>`, `<h1>`–`<h6>`, `<p>`, `<small>`, `<b>`, `<strong>`, `<output>`) with tight glyph-fitting bounds (`width: fit-content` on `<label>`/headings inside `flex-direction: column` containers — never stretched `100%`-wide invisible text boxes).
+   - **Never** leave bare unwrapped `TextNode`s mixed alongside sibling `<svg>`, `<button>`, `<input>`, `<select>`, `<a>`, or `<small>` elements inside a wrapper or button; wrap the text in a standalone `<span>` so every text and icon selects cleanly on its own and inside **Double-Click Isolation Mode**.
+2. **Invisible-Over-Visible Div Inset Rule (Critical)**:
    - **Never** size a transparent or invisible `<div>` (overlay, hit-zone, click-catcher, or wrapper) to the exact `100% × 100%` (`inset: 0`) bounds of a visible `<div>` / `.card` / `<section>` directly underneath it.
    - **Always inset the overlapping invisible `<div>` by `8px`–`12px`** (`inset: 8px;` or `width: calc(100% - 16px); height: calc(100% - 16px);`) so it is slightly smaller than the visible `<div>`.
-   - This preserves an `8px` outer rim around the visible `<div>` so both the visible container and the invisible `<div>` can be clicked, marquee-selected, and dragged independently (and once selected, an invisible `<div>` can also be dragged from anywhere inside its empty middle!).
+   - This preserves an `8px` outer rim around the visible `<div>` so both the visible container and the invisible `<div>` can be clicked, marquee-selected, and dragged independently (and once selected, a hollow invisible `<div>` can also be dragged from anywhere inside its empty middle!).
 2. **Zero Full-Bleed Pointer Blockers**:
    - Closed modals, backdrops, and overlays must use `hidden`, `display: none`, or `pointer-events: none` — never leave an invisible `position: fixed; inset: 0; pointer-events: auto` layer blocking canvas clicks.
 3. **Semantic IDs & Layer Names**:
@@ -80,5 +84,7 @@ curl -X POST http://127.0.0.1:4680/__vc_api/switch-target \
 - **One-Folder Recent Projects & Fixed-Width Page Selector**: `Open Recent Project` deduplicates strictly to one entry per project folder; topbar page selector (`#ddPage`) keeps a fixed `128px` width; `Layers` highlights and auto-scrolls to any canvas selection.
 - **GPU-First Acceleration with Automatic CPU Fallback**: Automatically probes WebGL2/WebGL1 hardware vs software/unavailable GPU, runs 3D `translate3d` compositor acceleration when GPU is healthy, and falls back seamlessly to lightweight 2D CPU rendering (`#accelModeBadge` + Preferences `Auto / GPU / CPU`).
 - **Persistent Marked-Area Note Tool (`N`) + Full Coding Agent Handoff**: Dragging with the Note tool draws a persistent Warm Orange region rectangle (`__vc_note_box__`) that stays visible both while writing the note (`is-pending`) and after saving alongside its numbered pin (`__vc_note_pin__`), syncing `markRect`, `sectionLabel`, `selector`, `enclosedElements`, `htmlSnippet`, and `text` directly to `memory/agent-notes.json`, `/__vc_api/notes`, 1-click `Copy Prompt`, and `.vectora-notes.json` in `.zip` exports.
-- **Adobe Illustrator Live Corner Widgets & Topbar Pixel/Roundness Control**: Selecting any shape, `<div>`, or card renders 4 circular Live Corner handles (`tl`, `tr`, `br`, `bl` — drag to round all corners, `Alt+Drag` for a single corner) and activates `#cornerControlBar` in the top canvas toolbar with a dynamic bending corner SVG, scrubbable `Corners:` label, slider, exact pixel input (`px`), and live roundness percentage badge (`%`).
-- **100% Pure Mathematical Vector Rendering (Zero Pixelation up to `1600%` Zoom)**: Zero `<canvas>` bitmaps in Studio UI (including a pure mathematical CSS-gradient 2D SV color field), native Skia vector re-rasterization on `.frame-stage` at every zoom level (`will-change: auto`), `geometricPrecision` SVG/text rendering, zoom-invariant `1px`/`1.5px` vector hairline overlays/handles/corner widgets, and automatic dynamic `devicePixelRatio` (`up to 6×`) supersampling for HTML5 `<canvas>` gizmos.
+- **Adobe Illustrator Live Corner Widgets, Web Effects Panel (`fx`) & Pure Mathematical Vector Rendering**:
+  - Selecting any shape, `<div>`, or card renders 4 circular Live Corner handles (`tl`, `tr`, `br`, `bl`) and activates `#cornerControlBar` (`Corners:` scrub handle, slider, `px` readout, and `%` roundness badge).
+  - Right beside `Corners:`, `#effectsControlBar` (`fx Effects`) opens `#vcEffectsPopover` with **Drop Shadow**, **Outer Glow**, **Inner Glow**, **Inner Shadow**, **Layer Blur (Gaussian)**, **Backdrop Frosted Glass Blur**, **Text Shadow / Glow**, **CSS Blend Modes & Filter Adjustments**, 1-click presets, custom `#vcColorPopover` swatches, Undo/Redo, and Direct CSS Sync.
+  - Clicking empty space inside OR outside the artboard (`#canvasScroll` pasteboard) clears selection immediately; **Double-Click Isolation Mode** drills down strictly 1 hierarchy level per double-click (never grabbing raw inner text characters) and exits via `Esc`, `#isolationBar`, or double-clicking outside; 100% mathematical vector rendering stays razor-sharp up to `1600%` zoom.

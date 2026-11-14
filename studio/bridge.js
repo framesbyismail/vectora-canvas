@@ -294,10 +294,17 @@
       html.__vc_edit_mode__[data-vc-cursor="zoom-out"] *:not([data-vc-ui]) {
         cursor: var(--vc-cur-zoom-out) !important;
       }
+      html.__vc_edit_mode__,
+      html.__vc_edit_mode__ *:not([contenteditable="true"].__vc_typing__):not(input):not(textarea) {
+        -webkit-user-select: none !important;
+        user-select: none !important;
+      }
       html.__vc_edit_mode__ [contenteditable="true"].__vc_typing__ {
         outline: 2px solid #f97316 !important;
         outline-offset: 2px !important;
         cursor: text !important;
+        -webkit-user-select: text !important;
+        user-select: text !important;
       }
       html[data-vc-preview-unlocked="true"] [data-pro-only]:not(.modal):not([role="dialog"]):not([hidden]),
       html[data-vc-preview-unlocked="true"] [data-pro-locked]:not(.modal):not([role="dialog"]):not([hidden]),
@@ -854,16 +861,53 @@
     dimDisjointSubtrees(document.body);
   }
 
+  function ensureIsolatedDirectTextSpans(containerEl) {
+    if (!containerEl || containerEl.nodeType !== 1 || isBridgeNode(containerEl)) return;
+    if (containerEl.children.length < 1) return;
+    const tag = containerEl.tagName.toUpperCase();
+    if (['SCRIPT', 'STYLE', 'SVG', 'SELECT', 'TEXTAREA', 'INPUT'].includes(tag)) return;
+    for (const node of Array.from(containerEl.childNodes)) {
+      if (node.nodeType === 3 && (node.nodeValue || '').trim().length > 0) {
+        const span = document.createElement('span');
+        span.setAttribute('data-vc-auto-text', '1');
+        span.style.display = 'inline';
+        span.textContent = node.nodeValue;
+        containerEl.replaceChild(span, node);
+      }
+    }
+  }
+
+  function getCleanIsolationLabel(el) {
+    if (!el || el.nodeType !== 1) return 'Object';
+    const dname = (el.getAttribute('data-name') || '').trim();
+    if (dname) return dname;
+    const tag = el.tagName.toLowerCase();
+    if (el.id && !el.id.startsWith('vc_')) return `${tag}#${el.id}`;
+    const cls = Array.from(el.classList || []).find((c) => c && !c.startsWith('__vc_') && !c.startsWith('vc-'));
+    return cls ? `${tag}.${cls}` : tag;
+  }
+
   function enterIsolationMode(entryObj, initialSelectEl = null) {
     if (!entryObj || !entryObj.id) return false;
     const cur = getActiveIsolation();
     if (cur && cur.id === entryObj.id) return false;
+    if (activeInlineEdit) {
+      commitInlineTypeEdit();
+    }
+    try {
+      window.getSelection?.()?.removeAllRanges?.();
+    } catch (_) {}
+    if (entryObj.kind === 'container') {
+      const rootEl = getEl(entryObj.id);
+      if (rootEl) ensureIsolatedDirectTextSpans(rootEl);
+    }
     isolationStack.push({
       id: entryObj.id,
       kind: entryObj.kind || 'group',
       name: entryObj.name || entryObj.id
     });
     activeGroupSelectionId = null;
+    keyObjectId = null;
     if (initialSelectEl && isElementInsideActiveIsolation(initialSelectEl)) {
       const vid = ensureVcId(initialSelectEl);
       selectedIds = vid ? [vid] : [];
@@ -1065,7 +1109,13 @@
       prop === 'background-image' ||
       prop === 'border' ||
       prop === 'border-width' ||
-      prop === 'border-style'
+      prop === 'border-style' ||
+      prop === 'box-shadow' ||
+      prop === 'text-shadow' ||
+      prop === 'filter' ||
+      prop === 'backdrop-filter' ||
+      prop === '-webkit-backdrop-filter' ||
+      prop === 'mix-blend-mode'
     ) {
       syncAuthoritativeStyleRules();
     }
@@ -1080,6 +1130,7 @@
       cssText: el.getAttribute('style') || '',
       unfillFill: el.getAttribute('data-vc-unfill-fill') || '',
       unfillStroke: el.getAttribute('data-vc-unfill-stroke') || '',
+      fxJson: el.getAttribute('data-vc-fx') || '',
       tx: el.getAttribute('data-vc-tx') || '',
       ty: el.getAttribute('data-vc-ty') || '',
       rot: el.getAttribute('data-vc-rot') || '',
@@ -1095,6 +1146,8 @@
     else snap.el.removeAttribute('data-vc-unfill-fill');
     if (snap.unfillStroke) snap.el.setAttribute('data-vc-unfill-stroke', snap.unfillStroke);
     else snap.el.removeAttribute('data-vc-unfill-stroke');
+    if (snap.fxJson) snap.el.setAttribute('data-vc-fx', snap.fxJson);
+    else snap.el.removeAttribute('data-vc-fx');
     if (snap.tx) snap.el.setAttribute('data-vc-tx', snap.tx);
     else snap.el.removeAttribute('data-vc-tx');
     if (snap.ty) snap.el.setAttribute('data-vc-ty', snap.ty);
@@ -2108,6 +2161,39 @@
     return !bgHex && !hasBgImg && !hasBorder && !hasShadow && !hasDirectNonEmptyText(el);
   }
 
+  function isPureTransparentLayoutWrapper(el) {
+    if (!el || el.nodeType !== 1 || el.tagName.toUpperCase() !== 'DIV') return false;
+    if (el.hasAttribute('data-vc-created') || el.classList.contains('vc-shape') || el.classList.contains('vc-flow-div')) return false;
+    if (el.children.length === 0) return false;
+    if (!isVisuallyTransparentDiv(el)) return false;
+    const cs = getComputedStyle(el);
+    if (cs.position === 'absolute' || cs.position === 'fixed') return false;
+    return true;
+  }
+
+  function getTextContentTightRect(el) {
+    if (!el || !el.firstChild) return null;
+    try {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const rr = range.getClientRects();
+      if (!rr || !rr.length) return null;
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (let i = 0; i < rr.length; i++) {
+        const c = rr[i];
+        if (c.width < 0.5 && c.height < 0.5) continue;
+        minX = Math.min(minX, c.left);
+        minY = Math.min(minY, c.top);
+        maxX = Math.max(maxX, c.right);
+        maxY = Math.max(maxY, c.bottom);
+      }
+      if (!isFinite(minX)) return null;
+      return { left: minX, top: minY, right: maxX, bottom: maxY, width: maxX - minX, height: maxY - minY };
+    } catch (_) {
+      return null;
+    }
+  }
+
   function resolveSelectableTarget(rawTarget, toolOverride, opts = {}) {
     const t = toolOverride || activeTool;
     const directSubSelect = Boolean(opts.directSubSelect) || t === 'direct';
@@ -2123,6 +2209,7 @@
     if (!el || isBridgeNode(el)) return null;
 
     const activeIso = getActiveIsolation();
+    const isoContainerRoot = activeIso && activeIso.kind === 'container' ? getEl(activeIso.id) : null;
     if (activeIso) {
       if (!isElementInsideActiveIsolation(el)) return null;
       if (activeIso.kind === 'container' && ensureVcId(el) === activeIso.id && !opts.allowIsolatedRoot) {
@@ -2142,23 +2229,84 @@
       }
     }
 
-    // In Selection tool (V), clicking empty space of page-level structural grid wrappers starts marquee rather than dragging <main>
+    // Adobe Illustrator Group Isolation Rule:
+    // When a Ctrl+G group is isolated, single-clicking inside any direct member container M selects M as a unit
+    // (never grabbing M's inner text by accident!). Double-clicking M isolates M one level deeper.
+    if (activeIso && activeIso.kind === 'group' && t === 'select' && !directSubSelect) {
+      const isoGrp = groupsById.get(activeIso.id);
+      if (isoGrp && Array.isArray(isoGrp.memberIds)) {
+        for (const mId of isoGrp.memberIds) {
+          if (groupsById.has(mId)) continue;
+          const mEl = getEl(mId);
+          if (mEl && (mEl === el || mEl.contains(el))) {
+            el = mEl;
+            break;
+          }
+        }
+      }
+    }
+
+    // In Selection tool (V), clicking empty space of page-level structural grid wrappers starts marquee / clears selection rather than dragging <main>
     if (t === 'select' && !directSubSelect && isStructuralGridWrapper(el)) {
       return null;
     }
 
-    // With Selection tool (V), promote inner icon/span inside <button>/<a> to the button when Smart Btns is on (unless directSubSelect)
+    // With Selection tool (V), promote inner icon/span inside <button>/<a> to the button when Smart Btns is on —
+    // EXCEPT when that <button>/<a> IS the currently isolated container (or wraps the isolated container), so isolated button children select freely!
     if (t === 'select' && autoGroupButtons && !directSubSelect) {
       const btn = el.closest('button, a, [role="button"]');
-      if (btn && !isBridgeNode(btn) && (!activeIso || isElementInsideActiveIsolation(btn))) {
+      if (
+        btn &&
+        !isBridgeNode(btn) &&
+        (!activeIso || (isElementInsideActiveIsolation(btn) && btn !== isoContainerRoot && (!isoContainerRoot || !btn.contains(isoContainerRoot))))
+      ) {
         el = btn;
       }
     }
 
-    // Walk up if element has zero area (e.g. hidden span)
-    while (el && el !== document.body) {
+    // If a block text tag (<label>, <h1>-<h6>, <p>) is stretched wide without background/border, clicking empty space far past its glyphs hits the parent container instead
+    if (
+      t === 'select' &&
+      !directSubSelect &&
+      opts.clientX !== undefined &&
+      opts.clientY !== undefined &&
+      ['LABEL', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'P'].includes(el.tagName.toUpperCase())
+    ) {
+      const csTxt = getComputedStyle(el);
+      const hasOwnBox = Boolean(rgbToHex(csTxt.backgroundColor)) || ((parseFloat(csTxt.borderTopWidth) || 0) > 0 && csTxt.borderTopStyle !== 'none');
+      if (!hasOwnBox) {
+        const er = el.getBoundingClientRect();
+        const tight = getTextContentTightRect(el);
+        if (tight && er.width > tight.width + 24) {
+          const outsideGlyphs =
+            opts.clientX < tight.left - 10 ||
+            opts.clientX > tight.right + 10 ||
+            opts.clientY < tight.top - 8 ||
+            opts.clientY > tight.bottom + 8;
+          if (outsideGlyphs) {
+            el = el.parentElement;
+          }
+        }
+      }
+    }
+
+    // Walk up past zero-area nodes AND pure transparent layout wrapper <div>s (.field, .row, .cbody, .labrow, etc.) so text is never trapped inside invisible boxes!
+    const isDirectIsoGroupMember = (node) => {
+      if (!activeIso || activeIso.kind !== 'group' || !node) return false;
+      const nid = idByEl.get(node);
+      return Boolean(nid && groupsById.get(activeIso.id)?.memberIds.includes(nid));
+    };
+    while (el && el !== document.body && el !== document.documentElement) {
+      if (activeIso && activeIso.kind === 'container' && el === isoContainerRoot) break;
       const r = el.getBoundingClientRect();
-      if (r.width >= 2 && r.height >= 2) break;
+      const tooSmall = r.width < 2 || r.height < 2;
+      const skipTransparentWrap =
+        t === 'select' &&
+        !directSubSelect &&
+        !isDirectIsoGroupMember(el) &&
+        !getTopmostGroupOf(ensureVcId(el)) &&
+        isPureTransparentLayoutWrapper(el);
+      if (!tooSmall && !skipTransparentWrap) break;
       el = el.parentElement;
     }
     if (!el || el === document.body || el === document.documentElement) return null;
@@ -2589,6 +2737,238 @@
     };
   }
 
+  function hexToRgbaCss(hex, opacityPct = 100) {
+    const clean = String(hex || '#000000').replace('#', '').trim();
+    let r = 0, g = 0, b = 0;
+    if (clean.length === 3) {
+      r = parseInt(clean[0] + clean[0], 16) || 0;
+      g = parseInt(clean[1] + clean[1], 16) || 0;
+      b = parseInt(clean[2] + clean[2], 16) || 0;
+    } else if (clean.length >= 6) {
+      r = parseInt(clean.slice(0, 2), 16) || 0;
+      g = parseInt(clean.slice(2, 4), 16) || 0;
+      b = parseInt(clean.slice(4, 6), 16) || 0;
+    }
+    const a = Math.max(0, Math.min(1, Math.round((Number(opacityPct ?? 100) / 100) * 100) / 100));
+    return `rgba(${r}, ${g}, ${b}, ${a})`;
+  }
+
+  function createDefaultEffectsState() {
+    return {
+      dropShadow: { enabled: false, x: 0, y: 8, blur: 20, spread: 0, color: '#000000', opacity: 55 },
+      outerGlow: { enabled: false, blur: 22, spread: 2, color: '#f97316', opacity: 65 },
+      innerGlow: { enabled: false, blur: 16, spread: 1, color: '#fb923c', opacity: 55 },
+      innerShadow: { enabled: false, x: 0, y: 3, blur: 10, spread: 0, color: '#000000', opacity: 50 },
+      layerBlur: { enabled: false, blur: 6 },
+      backdropBlur: { enabled: false, blur: 12, saturate: 140 },
+      textShadow: { enabled: false, x: 0, y: 2, blur: 10, color: '#f97316', opacity: 75 },
+      webAdjust: { blendMode: 'normal', brightness: 100, contrast: 100, saturate: 100, hueRotate: 0, grayscale: 0 }
+    };
+  }
+
+  function countActiveEffects(fx) {
+    if (!fx) return 0;
+    let c = 0;
+    if (fx.dropShadow?.enabled) c++;
+    if (fx.outerGlow?.enabled) c++;
+    if (fx.innerGlow?.enabled) c++;
+    if (fx.innerShadow?.enabled) c++;
+    if (fx.layerBlur?.enabled && Number(fx.layerBlur.blur) > 0) c++;
+    if (fx.backdropBlur?.enabled && Number(fx.backdropBlur.blur) > 0) c++;
+    if (fx.textShadow?.enabled) c++;
+    const wa = fx.webAdjust || {};
+    if (
+      (wa.blendMode && wa.blendMode !== 'normal') ||
+      (wa.brightness !== undefined && Number(wa.brightness) !== 100) ||
+      (wa.contrast !== undefined && Number(wa.contrast) !== 100) ||
+      (wa.saturate !== undefined && Number(wa.saturate) !== 100) ||
+      (wa.hueRotate !== undefined && Number(wa.hueRotate) !== 0) ||
+      (wa.grayscale !== undefined && Number(wa.grayscale) !== 0)
+    ) {
+      c++;
+    }
+    return c;
+  }
+
+  function readElementEffectsState(el, cs) {
+    const base = createDefaultEffectsState();
+    if (!el || !cs) return { ...base, activeCount: 0 };
+    const rawAttr = el.getAttribute('data-vc-fx');
+    if (rawAttr) {
+      try {
+        const parsed = JSON.parse(rawAttr);
+        const merged = {
+          dropShadow: { ...base.dropShadow, ...(parsed.dropShadow || {}) },
+          outerGlow: { ...base.outerGlow, ...(parsed.outerGlow || {}) },
+          innerGlow: { ...base.innerGlow, ...(parsed.innerGlow || {}) },
+          innerShadow: { ...base.innerShadow, ...(parsed.innerShadow || {}) },
+          layerBlur: { ...base.layerBlur, ...(parsed.layerBlur || {}) },
+          backdropBlur: { ...base.backdropBlur, ...(parsed.backdropBlur || {}) },
+          textShadow: { ...base.textShadow, ...(parsed.textShadow || {}) },
+          webAdjust: { ...base.webAdjust, ...(parsed.webAdjust || {}) }
+        };
+        return { ...merged, activeCount: countActiveEffects(merged) };
+      } catch (_) {}
+    }
+
+    // Best-effort read of existing computed CSS effects on elements not yet edited via Effects panel
+    const filt = cs.filter && cs.filter !== 'none' ? cs.filter : '';
+    const blurM = /blur\(\s*([\d.]+)px\s*\)/i.exec(filt);
+    if (blurM && parseFloat(blurM[1]) > 0) {
+      base.layerBlur.enabled = true;
+      base.layerBlur.blur = Math.round(parseFloat(blurM[1]) * 10) / 10;
+    }
+    const bf = (cs.backdropFilter && cs.backdropFilter !== 'none' ? cs.backdropFilter : '') ||
+      (cs.webkitBackdropFilter && cs.webkitBackdropFilter !== 'none' ? cs.webkitBackdropFilter : '');
+    const bBlurM = /blur\(\s*([\d.]+)px\s*\)/i.exec(bf);
+    if (bBlurM && parseFloat(bBlurM[1]) > 0) {
+      base.backdropBlur.enabled = true;
+      base.backdropBlur.blur = Math.round(parseFloat(bBlurM[1]) * 10) / 10;
+      const bSatM = /saturate\(\s*([\d.]+)%?\s*\)/i.exec(bf);
+      if (bSatM) {
+        const sv = parseFloat(bSatM[1]);
+        base.backdropBlur.saturate = Math.round(bSatM[0].includes('%') ? sv : sv * 100);
+      }
+    }
+    if (cs.mixBlendMode && cs.mixBlendMode !== 'normal') {
+      base.webAdjust.blendMode = cs.mixBlendMode;
+    }
+    return { ...base, activeCount: countActiveEffects(base) };
+  }
+
+  function compileEffectsToStyleProps(el, fx) {
+    const isSvg = Boolean(el && el.tagName && el.tagName.toUpperCase() === 'SVG');
+    const boxShadows = [];
+    const filterParts = [];
+
+    if (fx.dropShadow?.enabled) {
+      const ds = fx.dropShadow;
+      const col = hexToRgbaCss(ds.color || '#000000', ds.opacity ?? 55);
+      if (isSvg) {
+        filterParts.push(`drop-shadow(${Number(ds.x) || 0}px ${Number(ds.y) || 0}px ${Math.max(0, Number(ds.blur) || 0)}px ${col})`);
+      } else {
+        boxShadows.push(`${Number(ds.x) || 0}px ${Number(ds.y) || 0}px ${Math.max(0, Number(ds.blur) || 0)}px ${Number(ds.spread) || 0}px ${col}`);
+      }
+    }
+
+    if (fx.outerGlow?.enabled) {
+      const og = fx.outerGlow;
+      const col = hexToRgbaCss(og.color || '#f97316', og.opacity ?? 65);
+      if (isSvg) {
+        filterParts.push(`drop-shadow(0px 0px ${Math.max(0, Number(og.blur) || 0)}px ${col})`);
+      } else {
+        boxShadows.push(`0px 0px ${Math.max(0, Number(og.blur) || 0)}px ${Number(og.spread) || 0}px ${col}`);
+      }
+    }
+
+    if (fx.innerGlow?.enabled && !isSvg) {
+      const ig = fx.innerGlow;
+      const col = hexToRgbaCss(ig.color || '#fb923c', ig.opacity ?? 55);
+      boxShadows.push(`inset 0px 0px ${Math.max(0, Number(ig.blur) || 0)}px ${Number(ig.spread) || 0}px ${col}`);
+    }
+
+    if (fx.innerShadow?.enabled && !isSvg) {
+      const is = fx.innerShadow;
+      const col = hexToRgbaCss(is.color || '#000000', is.opacity ?? 50);
+      boxShadows.push(`inset ${Number(is.x) || 0}px ${Number(is.y) || 0}px ${Math.max(0, Number(is.blur) || 0)}px ${Number(is.spread) || 0}px ${col}`);
+    }
+
+    if (fx.layerBlur?.enabled && Number(fx.layerBlur.blur) > 0) {
+      filterParts.push(`blur(${Math.max(0, Number(fx.layerBlur.blur) || 0)}px)`);
+    }
+
+    const wa = fx.webAdjust || {};
+    if (wa.brightness !== undefined && Number(wa.brightness) !== 100) {
+      filterParts.push(`brightness(${Math.max(0, Number(wa.brightness))}%)`);
+    }
+    if (wa.contrast !== undefined && Number(wa.contrast) !== 100) {
+      filterParts.push(`contrast(${Math.max(0, Number(wa.contrast))}%)`);
+    }
+    if (wa.saturate !== undefined && Number(wa.saturate) !== 100) {
+      filterParts.push(`saturate(${Math.max(0, Number(wa.saturate))}%)`);
+    }
+    if (wa.hueRotate !== undefined && Number(wa.hueRotate) !== 0) {
+      filterParts.push(`hue-rotate(${Number(wa.hueRotate)}deg)`);
+    }
+    if (wa.grayscale !== undefined && Number(wa.grayscale) > 0) {
+      filterParts.push(`grayscale(${Math.min(100, Math.max(0, Number(wa.grayscale)))}%)`);
+    }
+
+    let textShadowVal = null;
+    if (fx.textShadow?.enabled) {
+      const ts = fx.textShadow;
+      const col = hexToRgbaCss(ts.color || '#f97316', ts.opacity ?? 75);
+      textShadowVal = `${Number(ts.x) || 0}px ${Number(ts.y) || 0}px ${Math.max(0, Number(ts.blur) || 0)}px ${col}`;
+    }
+
+    let backdropVal = null;
+    if (fx.backdropBlur?.enabled && Number(fx.backdropBlur.blur) > 0) {
+      const bb = fx.backdropBlur;
+      const sat = bb.saturate !== undefined && Number(bb.saturate) !== 100 ? ` saturate(${Math.max(0, Number(bb.saturate))}%)` : '';
+      backdropVal = `blur(${Math.max(0, Number(bb.blur) || 0)}px)${sat}`;
+    }
+
+    const blendVal = wa.blendMode && wa.blendMode !== 'normal' ? String(wa.blendMode) : null;
+
+    return {
+      'box-shadow': boxShadows.length ? boxShadows.join(', ') : null,
+      'filter': filterParts.length ? filterParts.join(' ') : null,
+      'backdrop-filter': backdropVal,
+      '-webkit-backdrop-filter': backdropVal,
+      'text-shadow': textShadowVal,
+      'mix-blend-mode': blendVal
+    };
+  }
+
+  function applyEffectsFromStudio(msg) {
+    pruneDisconnectedSelection();
+    if (!selectedIds.length) return;
+    const { fx, previewOnly, commitScrub, resetAll } = msg;
+    if (!pendingScrubStep) {
+      pendingScrubStep = selectedIds.map((id) => {
+        const el = getEl(id);
+        return el ? { id, el, before: snapshotElementState(el) } : null;
+      }).filter(Boolean);
+    }
+
+    const effectiveFx = resetAll ? createDefaultEffectsState() : (fx || createDefaultEffectsState());
+    const hasAnyActive = !resetAll && countActiveEffects(effectiveFx) > 0;
+
+    for (const item of pendingScrubStep) {
+      const el = item.el;
+      if (!el) continue;
+      if (hasAnyActive) {
+        el.setAttribute('data-vc-fx', JSON.stringify(effectiveFx));
+      } else {
+        el.removeAttribute('data-vc-fx');
+      }
+      const styleMap = compileEffectsToStyleProps(el, effectiveFx);
+      for (const [prop, val] of Object.entries(styleMap)) {
+        if (val === null || val === '') {
+          el.style.removeProperty(prop);
+          recordPatchedProp(el, prop, null);
+        } else {
+          el.style.setProperty(prop, val);
+          recordPatchedProp(el, prop, val);
+        }
+      }
+    }
+
+    syncAuthoritativeStyleRules();
+    renderOverlays();
+
+    if (!previewOnly || commitScrub) {
+      const entries = pendingScrubStep.map((it) => ({
+        kind: 'style',
+        before: it.before,
+        after: snapshotElementState(it.el)
+      }));
+      pendingScrubStep = null;
+      pushHistoryStep({ label: resetAll ? 'Reset Effects' : 'Update Effects', entries });
+      sendTreeAndSelectionUpdate();
+    }
+  }
+
   function canShowLiveCornerWidgets(el) {
     if (!el || el === document.body || el === document.documentElement) return false;
     if (el.getAttribute('data-vc-shape') === 'line') return false;
@@ -2677,6 +3057,7 @@
         roundPct: cornerMetrics ? cornerMetrics.roundPct : 0,
         corners: cornerMetrics ? cornerMetrics.corners : { tl: 0, tr: 0, br: 0, bl: 0 },
         shapeKind: cornerMetrics ? cornerMetrics.shapeKind : '',
+        effects: readElementEffectsState(firstEl, cs),
         display: cs.display || 'block',
         zIndex: cs.zIndex === 'auto' ? '' : cs.zIndex,
         opacity: Math.round((parseFloat(cs.opacity ?? '1') || 1) * 100),
@@ -4343,6 +4724,14 @@
         if (pBtn && rawSet.has(pBtn)) return false;
       }
       const isCreated = el.hasAttribute('data-vc-created') || el.classList.contains('vc-shape') || el.classList.contains('vc-flow-div');
+      // Filter out pure transparent layout wrapper <div>s (.field, .row, .cbody, .labrow, etc.) so marquee selects standalone texts/controls cleanly!
+      if (!isCreated && activeTool !== 'direct' && isPureTransparentLayoutWrapper(el)) {
+        const vcCheck = ensureVcId(el);
+        const inExplicitGroup = activeIso?.kind === 'group'
+          ? Boolean(groupsById.get(activeIso.id)?.memberIds.includes(vcCheck))
+          : Boolean(parentGroupOf.has(vcCheck));
+        if (!inExplicitGroup) return false;
+      }
       if (!isCreated && !['BUTTON', 'A', 'INPUT', 'SELECT', 'TEXTAREA', 'IMG', 'CANVAS', 'SVG'].includes(el.tagName.toUpperCase())) {
         const r = el.getBoundingClientRect();
         const fullyEnclosedByMarquee = r.left >= mx0 - 2 && r.right <= mx1 + 2 && r.top >= my0 - 2 && r.bottom <= my1 + 2;
@@ -5712,7 +6101,9 @@
           ev.clientY >= sr.top &&
           ev.clientY <= sr.bottom;
         if (!insideSelRect) continue;
-        if (isVisuallyTransparentDiv(selEl) || !hit || hit === selEl) {
+        const isHollowTransparentBox =
+          selEl.children.length === 0 && isVisuallyTransparentDiv(selEl);
+        if (isHollowTransparentBox || !hit || hit === selEl) {
           startMoveDrag(ev, selEl, false);
           return;
         }
@@ -5895,7 +6286,25 @@
       if (act.isCtrl) {
         handleIllustratorControlClick(ev, act.effectiveTool || 'select');
       } else if (act.containerEl) {
-        selectSingleOrToggle(act.containerEl, act.additive, { effectiveTool: act.effectiveTool || 'select' });
+        const cEl = act.containerEl;
+        const isTransparentWrapper =
+          cEl.tagName === 'DIV' &&
+          !cEl.hasAttribute('data-vc-created') &&
+          !cEl.classList.contains('vc-shape') &&
+          !cEl.classList.contains('vc-flow-div') &&
+          isVisuallyTransparentDiv(cEl) &&
+          cEl.children.length >= 1;
+        if (isTransparentWrapper) {
+          if (!act.additive) {
+            selectedIds = [];
+            activeGroupSelectionId = null;
+            keyObjectId = null;
+            renderOverlays();
+            sendTreeAndSelectionUpdate();
+          }
+        } else {
+          selectSingleOrToggle(cEl, act.additive, { effectiveTool: act.effectiveTool || 'select' });
+        }
       }
     } else if (act.type === 'marquee') {
       const box = {
@@ -6001,8 +6410,31 @@
     if (ev.target && ev.target.closest && ev.target.closest('#__vc_overlay_root__')) return;
     ev.preventDefault();
     ev.stopPropagation();
+    try {
+      window.getSelection?.()?.removeAllRanges?.();
+    } catch (_) {}
 
-    // 1) Double-click on a composite group (or nested subgroup inside current isolation) -> Enter Group Isolation Mode!
+    // 1) If Isolation Mode is active and user double-clicks outside the isolated bounds -> Exit Isolation Mode & clear selection (like Illustrator)!
+    if (getActiveIsolation()) {
+      const ib = getIsolatedBounds();
+      const outside =
+        !ib ||
+        ev.clientX < ib.left - 8 ||
+        ev.clientX > ib.right + 8 ||
+        ev.clientY < ib.top - 8 ||
+        ev.clientY > ib.bottom + 8;
+      if (outside) {
+        exitIsolationMode(true);
+        selectedIds = [];
+        activeGroupSelectionId = null;
+        keyObjectId = null;
+        renderOverlays();
+        sendTreeAndSelectionUpdate();
+        return;
+      }
+    }
+
+    // 2) Double-click on a composite Ctrl+G group (or nested subgroup inside current isolation) -> Enter Group Isolation Mode cleanly (1 level at a time, never grabbing inner text)!
     const directHit = resolveSelectableTarget(ev.target, 'direct', {
       directSubSelect: true,
       clientX: ev.clientX,
@@ -6014,37 +6446,50 @@
 
     if (candGrp && groupsById.has(candGrp)) {
       const grp = groupsById.get(candGrp);
-      enterIsolationMode({ id: candGrp, kind: 'group', name: grp.name || 'Group' }, directHit);
+      enterIsolationMode({ id: candGrp, kind: 'group', name: grp.name || 'Group' }, null);
       return;
     }
 
-    // 2) If Isolation Mode is active and user double-clicks outside the isolated bounds -> Exit Isolation Mode (like Illustrator)!
-    if (getActiveIsolation()) {
-      const ib = getIsolatedBounds();
-      const outside =
-        !ib ||
-        ev.clientX < ib.left - 8 ||
-        ev.clientX > ib.right + 8 ||
-        ev.clientY < ib.top - 8 ||
-        ev.clientY > ib.bottom + 8;
-      if (outside) {
-        exitIsolationMode(true);
+    // 3) Resolve selectable object at the CURRENT isolation level:
+    //    - If it is a composite container (<button>, <a>, .card, <section>, <nav>, or any multi-child box), Enter Container Isolation Mode!
+    //    - Only if it is ALREADY a pure leaf text element (children.length === 0) at this level, open Inline Type Edit!
+    const levelHit = resolveSelectableTarget(ev.target, 'select', {
+      clientX: ev.clientX,
+      clientY: ev.clientY
+    });
+
+    if (levelHit && levelHit !== document.body && levelHit !== document.documentElement) {
+      const tagUp = levelHit.tagName.toUpperCase();
+      const hasMixedTextAndElements =
+        levelHit.children.length >= 1 &&
+        !['SVG', 'SELECT', 'INPUT', 'TEXTAREA', 'IMG', 'CANVAS', 'VIDEO'].includes(tagUp);
+      if (hasMixedTextAndElements) {
+        const cid = ensureVcId(levelHit);
+        enterIsolationMode({ id: cid, kind: 'container', name: getCleanIsolationLabel(levelHit) }, null);
+        return;
+      }
+
+      if (
+        levelHit.children.length === 0 &&
+        !['INPUT', 'SELECT', 'TEXTAREA', 'IMG', 'CANVAS', 'SVG', 'HR', 'BR'].includes(tagUp) &&
+        ((levelHit.textContent || '').trim().length > 0 || ['H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'P', 'SPAN', 'LABEL', 'BUTTON', 'A', 'B', 'STRONG', 'SMALL'].includes(tagUp))
+      ) {
+        startInlineTypeEdit(levelHit);
         return;
       }
     }
 
-    // 3) Double-click on direct text leaf (ungrouped, or already inside Isolation Mode) -> Inline text editing
-    const txtEl = findDirectTextElementAt(ev.target, ev.clientX, ev.clientY);
-    if (txtEl && (txtEl.children.length === 0 || ['BUTTON', 'A', 'H1', 'H2', 'H3', 'H4', 'P', 'SPAN', 'LABEL'].includes(txtEl.tagName))) {
-      startInlineTypeEdit(txtEl);
-      return;
-    }
-
-    // 4) Double-click on a multi-child container (div/card/section) -> Enter Container Isolation Mode!
-    if (directHit && directHit.children && directHit.children.length >= 2) {
-      const cid = ensureVcId(directHit);
-      const cname = `${directHit.tagName.toLowerCase()}${directHit.id && !directHit.id.startsWith('vc_') ? '#' + directHit.id : ''}`;
-      enterIsolationMode({ id: cid, kind: 'container', name: cname });
+    // 4) Fallback: double-click on a multi-child landmark/section surface -> Enter Container Isolation Mode!
+    const fallbackContainer = ev.target?.closest?.('.card, section, header, nav, aside, footer, article');
+    if (
+      fallbackContainer &&
+      !isBridgeNode(fallbackContainer) &&
+      !isStructuralGridWrapper(fallbackContainer) &&
+      fallbackContainer.children.length >= 1 &&
+      (!getActiveIsolation() || (isElementInsideActiveIsolation(fallbackContainer) && ensureVcId(fallbackContainer) !== getActiveIsolation().id))
+    ) {
+      const cid = ensureVcId(fallbackContainer);
+      enterIsolationMode({ id: cid, kind: 'container', name: getCleanIsolationLabel(fallbackContainer) }, null);
     }
   }, true);
 
@@ -6616,6 +7061,9 @@
             const origCss = initialStyleByEl.get(el) || '';
             if (origCss) el.setAttribute('style', origCss);
             else el.removeAttribute('style');
+            el.removeAttribute('data-vc-fx');
+            el.removeAttribute('data-vc-unfill-fill');
+            el.removeAttribute('data-vc-unfill-stroke');
             patchedPropsByEl.delete(id);
             entries.push({ kind: 'style', before, after: snapshotElementState(el) });
           }
@@ -6624,6 +7072,14 @@
           renderOverlays();
           sendTreeAndSelectionUpdate();
         }
+        break;
+      }
+      case 'apply_effects': {
+        applyEffectsFromStudio(msg);
+        break;
+      }
+      case 'reset_effects': {
+        applyEffectsFromStudio({ resetAll: true, previewOnly: false, commitScrub: true });
         break;
       }
       case 'clear_selection': {

@@ -442,6 +442,8 @@ function readWholeFolderTextMap(rootDir, refreshOrigins = false) {
   return { files: listed, contents, origins };
 }
 
+const lastVectoraWriteMtimeByFile = new Map();
+
 function ensureWorkspacesSnapshots(relFile, refreshSessionOrigin = false) {
   if (!resolvedTargetDir) return;
   const srcFile = path.join(resolvedTargetDir, relFile);
@@ -454,13 +456,25 @@ function ensureWorkspacesSnapshots(relFile, refreshSessionOrigin = false) {
   }
 
   const originFile = path.join(sessionOriginDir, relFile);
-  if (refreshSessionOrigin || !fs.existsSync(originFile)) {
+  const savedFile = path.join(savedBaselineDir, relFile);
+
+  // Detect external modifications on disk (e.g. Coding Agent / IDE edited HTML/CSS/JS directly)
+  let externallyModified = false;
+  try {
+    const srcMs = fs.statSync(srcFile).mtimeMs;
+    const lastVcMs = lastVectoraWriteMtimeByFile.get(srcFile) || 0;
+    const origMs = fs.existsSync(originFile) ? fs.statSync(originFile).mtimeMs : 0;
+    if (origMs > 0 && srcMs > Math.max(lastVcMs, origMs) + 250) {
+      externallyModified = true;
+    }
+  } catch (_) {}
+
+  if (refreshSessionOrigin || externallyModified || !fs.existsSync(originFile)) {
     fs.mkdirSync(path.dirname(originFile), { recursive: true });
     fs.copyFileSync(srcFile, originFile);
   }
 
-  const savedFile = path.join(savedBaselineDir, relFile);
-  if (!fs.existsSync(savedFile)) {
+  if (externallyModified || !fs.existsSync(savedFile)) {
     fs.mkdirSync(path.dirname(savedFile), { recursive: true });
     fs.copyFileSync(srcFile, savedFile);
   }
@@ -1282,7 +1296,15 @@ const server = http.createServer(async (req, res) => {
       }
       const autoSyncOnly = Boolean(body.autoSyncOnly);
       const snap = readWholeFolderTextMap(resolvedTargetDir, false);
-      const mergedMap = { ...snap.contents, ...(body.files || {}) };
+      const incomingFiles = body.files && typeof body.files === 'object' ? body.files : {};
+      // When syncing a canvas payload, preserve fresh disk contents (including Coding Agent edits) for existing files;
+      // only overlay newly created in-studio files or explicit Code-tab edits!
+      const mergedMap = body.payload
+        ? {
+            ...Object.fromEntries(Object.entries(incomingFiles).filter(([k]) => !(k in snap.contents))),
+            ...snap.contents
+          }
+        : { ...snap.contents, ...incomingFiles };
       const originMap = { ...snap.origins };
       // If user explicitly edited raw code in the Code tab, treat those edits as part of the base map
       if (body.codeEditedFiles && typeof body.codeEditedFiles === 'object') {
@@ -1292,7 +1314,9 @@ const server = http.createServer(async (req, res) => {
         }
       }
       let outFiles = mergedMap;
-      let modifiedList = Object.keys(body.files || {});
+      const newClientFiles = Object.keys(incomingFiles).filter((k) => !(k in snap.contents));
+      const explicitCodeEdits = Object.keys(body.codeEditedFiles || {});
+      let modifiedList = body.payload ? [...newClientFiles, ...explicitCodeEdits] : Object.keys(incomingFiles);
       if (body.payload) {
         const synced = codeSync.applyCanvasPayloadToProject({
           entry: body.entry || args.entry || 'index.html',
@@ -1313,6 +1337,9 @@ const server = http.createServer(async (req, res) => {
         if (fs.existsSync(full)) ensureWorkspacesSnapshots(cleanRel, false);
         fs.mkdirSync(path.dirname(full), { recursive: true });
         fs.writeFileSync(full, String(outFiles[cleanRel]), 'utf8');
+        try {
+          lastVectoraWriteMtimeByFile.set(full, fs.statSync(full).mtimeMs);
+        } catch (_) {}
         if (!autoSyncOnly) {
           const savedFile = path.join(savedBaselineDir, cleanRel);
           fs.mkdirSync(path.dirname(savedFile), { recursive: true });

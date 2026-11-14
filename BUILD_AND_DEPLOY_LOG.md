@@ -153,3 +153,25 @@
 - **Fixes (`studio/index.html`, `studio/studio.css`, `studio/bridge.js`, `studio/studio.js`)**:
   - **4 On-Canvas Live Corner Widgets (`__vc_corner_widget__`)**: Renders 4 Illustrator-style circular bulls-eye handles (`tl`, `tr`, `br`, `bl`) inside the corners of any selected shape, `<div>`, or card. Dragging inward/outward rounds all 4 corners smoothly with live floating HUD (`Corners: 28 px · 47%`) and full Undo/Redo; holding **`Alt+Drag`** rounds a single corner independently.
   - **Topbar Illustrator `Corners:` Control (`#cornerControlBar`)**: Placed directly beside `[Shape Tool (R)] [Rect | Rounded | Ellipse | Pill | Line] div` in `.canvas-toolbar .ct-left`, featuring a dynamic SVG corner arc (`#cornerArcPath` + `#cornerArcDot`) that bends proportionally from 90° (`0%`) to a full curve (`100%`), scrubbable `Corners:` label, live Warm Orange slider (`#topCornerSlider`), exact pixel input (`#topCornerInput`, e.g. `33 px`), and live roundness percentage badge (`#topCornerRoundBadge`, e.g. `55%`) with zero toolbar clipping.
+
+
+---
+
+## Phase 4 — 100% Crisp Vector Engine, Standalone Tight Text Rule, Illustrator Isolation Mode, Web Effects Panel & Pasteboard Deselect
+
+### 15. 100% Crisp Vector Rendering Up to `1600%` Zoom (`studio/studio.js`, `studio/studio.css`, `studio/bridge.js`)
+- Replaced bitmap `<canvas>` color-picker fields with pure CSS vector linear-gradient SV planes (`#vcCpSvCanvas`), removed `will-change: transform` bitmap layer caching on `#frameStage`, added `--vc-inv-zoom` counter-scaling so selection handles and Live Corner widgets stay razor-sharp `1x` screen size at any zoom, and dynamically supersampled target `<canvas>` backing buffers up to `6x` DPR.
+
+### 16. Empty Space & Dark Pasteboard Deselect (`studio/studio.js`, `studio/bridge.js`)
+- Clicking the dark pasteboard outside `#frameStage` (`#canvasScroll`) or empty background space inside the artboard immediately clears selection (`No element selected`) and closes open popovers. Double-clicking outside the artboard while in Isolation Mode exits Isolation Mode cleanly.
+
+### 17. Standalone Tight Text Engine + Mandatory Pre-Open Coding Agent Rule (`studio/bridge.js`, `rules/AGENTS.md`, `SKILL.md`)
+- Pure transparent layout wrappers (`.field`, `.row`, `.cbody`, `.labrow`) pass clicks and marquees directly to standalone tight text elements (`width: fit-content`), and clicking child text inside an already-selected container switches selection to that child text while hollow invisible overlays still hold selection from their empty middle.
+- Added **Rule 1 (Mandatory Pre-Open Audit)** & **Rule 2 (Standalone Tight Text Rule)** across `AGENTS.md` and `SKILL.md`, and applied them across VisionPilot (`h:/AntyGravety/github`) with **`0/2073600` pixel diff (`maxDelta=0`)** across all 5 views.
+
+### 18. Adobe Illustrator-Exact Isolation Mode (`studio/bridge.js`)
+- Disabled native browser `user-select` in Edit Mode under `Select (V)` / `Direct (A)` so double-clicking never accidentally highlights raw DOM characters or triggers `contentEditable` (reserved for `Type (T)`).
+- Drills down **1 hierarchy level per double-click**: double-clicking a `Ctrl+G` Group enters Group Isolation where dragging over a member box's text moves the whole member box intact; a second double-click drills into Container Isolation where inner text/icons move independently.
+
+### 19. Web Effects Panel (`fx Effects`) Beside Round Corner (`studio/index.html`, `studio/studio.css`, `studio/studio.js`, `studio/bridge.js`)
+- Added `#effectsControlBar` (`fx Effects` + `#fxActiveCountBadge`) right beside `#cornerControlBar` in `.canvas-toolbar .ct-left`, opening `#vcEffectsPopover` with **Drop Shadow**, **Outer Glow**, **Inner Glow**, **Inner Shadow**, **Layer Blur**, **Backdrop Glass Blur**, **Text Shadow / Glow**, **Blend Mode & Filter Adjustments** (`Brightness`, `Contrast`, `Saturate`, `Hue`, `Grayscale`), 6 quick presets, `Reset`, Undo/Redo, and live CSS Code Sync.

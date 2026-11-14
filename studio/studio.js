@@ -342,6 +342,7 @@
     closeAllDropdowns();
     hideContextMenu();
     closeCustomColorPopover();
+    closeEffectsPopover();
   });
 
   function populateSimpleDropdown(menuEl, items, activeVal, onPick) {
@@ -637,6 +638,24 @@
         const rect = canvasScroll.getBoundingClientRect();
         const factor = ev.altKey ? 0.8 : 1.25;
         setZoomAtPoint(state.zoom * factor, ev.clientX - rect.left, ev.clientY - rect.top);
+      } else if (ev.button === 0 && state.mode === 'edit' && (!ev.target.closest || !ev.target.closest('#frameStage'))) {
+        // Clicking empty pasteboard outside the artboard clears active selection & closes floating popovers!
+        closeAllDropdowns();
+        hideContextMenu();
+        closeCustomColorPopover();
+        closeEffectsPopover();
+        if (!ev.shiftKey) {
+          postToBridge('clear_selection');
+        }
+      }
+    });
+    canvasScroll.addEventListener('dblclick', (ev) => {
+      if (ev.target && ev.target.closest && ev.target.closest('#canvasMinimap')) return;
+      if (state.mode === 'edit' && (!ev.target.closest || !ev.target.closest('#frameStage'))) {
+        if (state.isolation && state.isolation.active) {
+          postToBridge('exit_isolation', { exitAll: true });
+        }
+        postToBridge('clear_selection');
       }
     });
     window.addEventListener('mousemove', (ev) => {
@@ -805,6 +824,11 @@
       }
       case 'inpDistGap':
         // Used when clicking Vertical/Horizontal Distribute Space buttons
+        break;
+      default:
+        if (inputId && inputId.startsWith('fx')) {
+          handleEffectsNumericInput(inputId, numericVal, previewOnly, commitScrub);
+        }
         break;
     }
     if (commitScrub && state.preferences.autoSave) scheduleAutoSaveIfEnabled();
@@ -1306,7 +1330,12 @@
       inpSecondaryColor: 'Secondary Color',
       activePaintPicker: state.activeProxy === 'stroke' ? 'Stroke Color' : 'Fill Color',
       gradStopColor: 'Gradient Stop Color',
-      propColorPicker: 'Text Color'
+      propColorPicker: 'Text Color',
+      fxDsColor: 'Drop Shadow Color',
+      fxOgColor: 'Outer Glow Color',
+      fxIgColor: 'Inner Glow Color',
+      fxIsColor: 'Inner Shadow Color',
+      fxTsColor: 'Text Shadow / Glow Color'
     };
     if ($('vcCpTitle')) {
       $('vcCpTitle').textContent = titleMap[targetInput.id] || 'Color Picker';
@@ -2151,10 +2180,363 @@
     updateCornerArcPreview(roundPct);
   }
 
+  const FX_BLEND_MODES = [
+    'normal',
+    'multiply',
+    'screen',
+    'overlay',
+    'lighten',
+    'color-dodge',
+    'soft-light',
+    'difference',
+    'luminosity'
+  ];
+
+  let activeFxBlendMode = 'normal';
+
+  function closeEffectsPopover() {
+    const pop = $('vcEffectsPopover');
+    if (!pop || pop.hidden) return;
+    closeCustomColorPopover();
+    pop.hidden = true;
+    if ($('btnEffectsPopover')) $('btnEffectsPopover').classList.remove('active');
+  }
+
+  function openEffectsPopover(anchorEl = null) {
+    const pop = $('vcEffectsPopover');
+    if (!pop) return;
+    closeAllDropdowns();
+    hideContextMenu();
+    closeCustomColorPopover();
+
+    syncEffectsBarAndPopover();
+    pop.hidden = false;
+    if ($('btnEffectsPopover')) $('btnEffectsPopover').classList.add('active');
+
+    const ref = anchorEl || $('btnEffectsPopover');
+    if (ref) {
+      const rect = ref.getBoundingClientRect();
+      const popW = pop.offsetWidth || 344;
+      const popH = pop.offsetHeight || 480;
+      let left = rect.left;
+      let top = rect.bottom + 6;
+      if (left + popW > window.innerWidth - 10) {
+        left = Math.max(10, window.innerWidth - popW - 10);
+      }
+      if (top + popH > window.innerHeight - 10) {
+        top = Math.max(42, window.innerHeight - popH - 10);
+      }
+      pop.style.left = `${Math.round(left)}px`;
+      pop.style.top = `${Math.round(top)}px`;
+    }
+  }
+
+  function syncEffectsCardHighlights() {
+    const map = [
+      ['fxCardDropShadow', 'fxDsEnable'],
+      ['fxCardOuterGlow', 'fxOgEnable'],
+      ['fxCardInnerGlow', 'fxIgEnable'],
+      ['fxCardInnerShadow', 'fxIsEnable'],
+      ['fxCardTextShadow', 'fxTsEnable']
+    ];
+    for (const [cardId, chkId] of map) {
+      const card = $(cardId);
+      const chk = $(chkId);
+      if (card && chk) card.classList.toggle('is-enabled', Boolean(chk.checked));
+    }
+  }
+
+  function readEffectsStateFromPopoverUI() {
+    const num = (id, fb = 0) => parseNumericValue($(id)?.value, fb);
+    return {
+      dropShadow: {
+        enabled: Boolean($('fxDsEnable')?.checked),
+        x: Math.round(num('fxDsX', 0)),
+        y: Math.round(num('fxDsY', 8)),
+        blur: Math.max(0, Math.round(num('fxDsBlur', 20))),
+        spread: Math.round(num('fxDsSpread', 0)),
+        color: $('fxDsColor')?.value || '#000000',
+        opacity: Math.max(0, Math.min(100, Math.round(num('fxDsOpacity', 55))))
+      },
+      outerGlow: {
+        enabled: Boolean($('fxOgEnable')?.checked),
+        blur: Math.max(0, Math.round(num('fxOgBlur', 22))),
+        spread: Math.round(num('fxOgSpread', 2)),
+        color: $('fxOgColor')?.value || '#f97316',
+        opacity: Math.max(0, Math.min(100, Math.round(num('fxOgOpacity', 65))))
+      },
+      innerGlow: {
+        enabled: Boolean($('fxIgEnable')?.checked),
+        blur: Math.max(0, Math.round(num('fxIgBlur', 16))),
+        spread: Math.round(num('fxIgSpread', 1)),
+        color: $('fxIgColor')?.value || '#fb923c',
+        opacity: Math.max(0, Math.min(100, Math.round(num('fxIgOpacity', 55))))
+      },
+      innerShadow: {
+        enabled: Boolean($('fxIsEnable')?.checked),
+        x: Math.round(num('fxIsX', 0)),
+        y: Math.round(num('fxIsY', 3)),
+        blur: Math.max(0, Math.round(num('fxIsBlur', 10))),
+        spread: Math.round(num('fxIsSpread', 0)),
+        color: $('fxIsColor')?.value || '#000000',
+        opacity: Math.max(0, Math.min(100, Math.round(num('fxIsOpacity', 50))))
+      },
+      layerBlur: {
+        enabled: Boolean($('fxLbEnable')?.checked),
+        blur: Math.max(0, Math.round(num('fxLbBlur', 6) * 10) / 10)
+      },
+      backdropBlur: {
+        enabled: Boolean($('fxBbEnable')?.checked),
+        blur: Math.max(0, Math.round(num('fxBbBlur', 12))),
+        saturate: Math.max(0, Math.round(num('fxBbSaturate', 140)))
+      },
+      textShadow: {
+        enabled: Boolean($('fxTsEnable')?.checked),
+        x: Math.round(num('fxTsX', 0)),
+        y: Math.round(num('fxTsY', 2)),
+        blur: Math.max(0, Math.round(num('fxTsBlur', 10))),
+        color: $('fxTsColor')?.value || '#f97316',
+        opacity: Math.max(0, Math.min(100, Math.round(num('fxTsOpacity', 75))))
+      },
+      webAdjust: {
+        blendMode: activeFxBlendMode || 'normal',
+        brightness: Math.max(0, Math.round(num('fxWaBright', 100))),
+        contrast: Math.max(0, Math.round(num('fxWaContrast', 100))),
+        saturate: Math.max(0, Math.round(num('fxWaSaturate', 100))),
+        hueRotate: Math.round(num('fxWaHue', 0)),
+        grayscale: Math.max(0, Math.min(100, Math.round(num('fxWaGray', 0))))
+      }
+    };
+  }
+
+  function dispatchEffectsFromUI(previewOnly = false, commitScrub = true) {
+    syncEffectsCardHighlights();
+    if (!state.selection || state.selection.count < 1) {
+      if (commitScrub) showToast('Select an object on the artboard first to apply effects');
+      return;
+    }
+    state.everEditedInSession = true;
+    const fx = readEffectsStateFromPopoverUI();
+    postToBridge('apply_effects', { fx, previewOnly, commitScrub });
+    if (commitScrub) {
+      scheduleAutoCodeSync();
+    }
+  }
+
+  function handleEffectsNumericInput(inputId, _numericVal, previewOnly, commitScrub) {
+    // Auto-enable parent effect module when scrubbing/typing its parameters
+    if (inputId.startsWith('fxDs') && $('fxDsEnable') && !$('fxDsEnable').checked) $('fxDsEnable').checked = true;
+    else if (inputId.startsWith('fxOg') && $('fxOgEnable') && !$('fxOgEnable').checked) $('fxOgEnable').checked = true;
+    else if (inputId.startsWith('fxIg') && $('fxIgEnable') && !$('fxIgEnable').checked) $('fxIgEnable').checked = true;
+    else if (inputId.startsWith('fxIs') && $('fxIsEnable') && !$('fxIsEnable').checked) $('fxIsEnable').checked = true;
+    else if (inputId.startsWith('fxLb') && $('fxLbEnable') && !$('fxLbEnable').checked) $('fxLbEnable').checked = true;
+    else if (inputId.startsWith('fxBb') && $('fxBbEnable') && !$('fxBbEnable').checked) $('fxBbEnable').checked = true;
+    else if (inputId.startsWith('fxTs') && $('fxTsEnable') && !$('fxTsEnable').checked) $('fxTsEnable').checked = true;
+    dispatchEffectsFromUI(previewOnly, commitScrub);
+  }
+
+  function syncEffectsBarAndPopover() {
+    const sel = state.selection || { count: 0, props: null };
+    const p = sel.props;
+    const bar = $('effectsControlBar');
+    if (bar) {
+      bar.hidden = state.mode !== 'edit';
+    }
+    const fx = p && p.effects ? p.effects : null;
+    const activeCount = fx && typeof fx.activeCount === 'number' ? fx.activeCount : 0;
+
+    const badge = $('fxActiveCountBadge');
+    if (badge) {
+      badge.hidden = activeCount < 1;
+      badge.textContent = String(activeCount);
+    }
+    const btn = $('btnEffectsPopover');
+    if (btn) {
+      btn.classList.toggle('has-active-fx', activeCount > 0);
+    }
+    if ($('fxTargetLabel')) {
+      $('fxTargetLabel').textContent = sel.count > 0 ? (sel.summary || p?.selector || 'Selected') : 'No Selection';
+    }
+
+    if (!fx) return;
+
+    const setVal = (id, v) => {
+      const el = $(id);
+      if (el && document.activeElement !== el) el.value = v;
+    };
+    const setChk = (id, b) => {
+      const el = $(id);
+      if (el) el.checked = Boolean(b);
+    };
+    const setColor = (inpId, lblId, hex) => {
+      const clean = /^#[0-9a-f]{6}$/i.test(String(hex || '')) ? String(hex).toLowerCase() : '#000000';
+      if ($(inpId)) $(inpId).value = clean;
+      if ($(lblId)) $(lblId).textContent = clean;
+    };
+
+    const ds = fx.dropShadow || {};
+    setChk('fxDsEnable', ds.enabled);
+    setVal('fxDsX', `${ds.x ?? 0}px`);
+    setVal('fxDsY', `${ds.y ?? 8}px`);
+    setVal('fxDsBlur', `${ds.blur ?? 20}px`);
+    setVal('fxDsSpread', `${ds.spread ?? 0}px`);
+    setColor('fxDsColor', 'fxDsColorHex', ds.color || '#000000');
+    setVal('fxDsOpacity', `${ds.opacity ?? 55}%`);
+
+    const og = fx.outerGlow || {};
+    setChk('fxOgEnable', og.enabled);
+    setVal('fxOgBlur', `${og.blur ?? 22}px`);
+    setVal('fxOgSpread', `${og.spread ?? 2}px`);
+    setColor('fxOgColor', 'fxOgColorHex', og.color || '#f97316');
+    setVal('fxOgOpacity', `${og.opacity ?? 65}%`);
+
+    const ig = fx.innerGlow || {};
+    setChk('fxIgEnable', ig.enabled);
+    setVal('fxIgBlur', `${ig.blur ?? 16}px`);
+    setVal('fxIgSpread', `${ig.spread ?? 1}px`);
+    setColor('fxIgColor', 'fxIgColorHex', ig.color || '#fb923c');
+    setVal('fxIgOpacity', `${ig.opacity ?? 55}%`);
+
+    const is = fx.innerShadow || {};
+    setChk('fxIsEnable', is.enabled);
+    setVal('fxIsX', `${is.x ?? 0}px`);
+    setVal('fxIsY', `${is.y ?? 3}px`);
+    setVal('fxIsBlur', `${is.blur ?? 10}px`);
+    setVal('fxIsSpread', `${is.spread ?? 0}px`);
+    setColor('fxIsColor', 'fxIsColorHex', is.color || '#000000');
+    setVal('fxIsOpacity', `${is.opacity ?? 50}%`);
+
+    const lb = fx.layerBlur || {};
+    setChk('fxLbEnable', lb.enabled);
+    setVal('fxLbBlur', `${lb.blur ?? 6}px`);
+
+    const bb = fx.backdropBlur || {};
+    setChk('fxBbEnable', bb.enabled);
+    setVal('fxBbBlur', `${bb.blur ?? 12}px`);
+    setVal('fxBbSaturate', `${bb.saturate ?? 140}%`);
+
+    const ts = fx.textShadow || {};
+    setChk('fxTsEnable', ts.enabled);
+    setVal('fxTsX', `${ts.x ?? 0}px`);
+    setVal('fxTsY', `${ts.y ?? 2}px`);
+    setVal('fxTsBlur', `${ts.blur ?? 10}px`);
+    setColor('fxTsColor', 'fxTsColorHex', ts.color || '#f97316');
+    setVal('fxTsOpacity', `${ts.opacity ?? 75}%`);
+
+    const wa = fx.webAdjust || {};
+    activeFxBlendMode = wa.blendMode || 'normal';
+    if ($('ddFxBlendLabel')) $('ddFxBlendLabel').textContent = activeFxBlendMode;
+    setVal('fxWaBright', `${wa.brightness ?? 100}%`);
+    setVal('fxWaContrast', `${wa.contrast ?? 100}%`);
+    setVal('fxWaSaturate', `${wa.saturate ?? 100}%`);
+    setVal('fxWaHue', `${wa.hueRotate ?? 0}deg`);
+    setVal('fxWaGray', `${wa.grayscale ?? 0}%`);
+
+    syncEffectsCardHighlights();
+  }
+
+  function applyEffectsPreset(presetId) {
+    if (!state.selection || state.selection.count < 1) {
+      showToast('Select an object on the artboard first to apply an effect preset');
+      return;
+    }
+    // Start clean from current state, enabling the chosen preset cleanly
+    const cur = readEffectsStateFromPopoverUI();
+    if (presetId === 'soft-shadow') {
+      cur.dropShadow = { enabled: true, x: 0, y: 8, blur: 22, spread: 0, color: '#000000', opacity: 48 };
+    } else if (presetId === 'deep-lift') {
+      cur.dropShadow = { enabled: true, x: 0, y: 18, blur: 40, spread: -4, color: '#000000', opacity: 68 };
+    } else if (presetId === 'outer-glow') {
+      cur.outerGlow = { enabled: true, blur: 24, spread: 2, color: '#f97316', opacity: 70 };
+    } else if (presetId === 'inner-glow') {
+      cur.innerGlow = { enabled: true, blur: 16, spread: 1, color: '#fb923c', opacity: 55 };
+    } else if (presetId === 'frosted-glass') {
+      cur.backdropBlur = { enabled: true, blur: 14, saturate: 150 };
+      cur.innerGlow = { enabled: true, blur: 12, spread: 0, color: '#fafaf9', opacity: 18 };
+    } else if (presetId === 'text-glow') {
+      cur.textShadow = { enabled: true, x: 0, y: 0, blur: 14, color: '#f97316', opacity: 82 };
+    }
+    state.everEditedInSession = true;
+    postToBridge('apply_effects', { fx: cur, previewOnly: false, commitScrub: true });
+    scheduleAutoCodeSync();
+  }
+
+  function wireEffectsPopover() {
+    const pop = $('vcEffectsPopover');
+    const btn = $('btnEffectsPopover');
+    if (!pop || !btn) return;
+
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      if (pop.hidden) openEffectsPopover(btn);
+      else closeEffectsPopover();
+    });
+
+    pop.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      if (!ev.target.closest('.vc-dd')) closeAllDropdowns();
+      if (!ev.target.closest('.vfx-swatch-chip')) closeCustomColorPopover();
+    });
+    pop.addEventListener('mousedown', (ev) => ev.stopPropagation());
+
+    if ($('btnCloseEffectsPopover')) {
+      $('btnCloseEffectsPopover').addEventListener('click', () => closeEffectsPopover());
+    }
+    if ($('btnResetEffects')) {
+      $('btnResetEffects').addEventListener('click', () => {
+        if (!state.selection || state.selection.count < 1) return;
+        state.everEditedInSession = true;
+        postToBridge('reset_effects');
+        scheduleAutoCodeSync();
+        showToast('Cleared Web Effects on selection');
+      });
+    }
+
+    document.querySelectorAll('#fxPresetsRow [data-fx-preset]').forEach((pb) => {
+      pb.addEventListener('click', () => {
+        applyEffectsPreset(pb.getAttribute('data-fx-preset'));
+      });
+    });
+
+    ['fxDsEnable', 'fxOgEnable', 'fxIgEnable', 'fxIsEnable', 'fxLbEnable', 'fxBbEnable', 'fxTsEnable'].forEach((chkId) => {
+      const chk = $(chkId);
+      if (chk) {
+        chk.addEventListener('change', () => dispatchEffectsFromUI(false, true));
+      }
+    });
+
+    [
+      ['fxDsColor', 'fxDsColorHex', 'fxDsEnable'],
+      ['fxOgColor', 'fxOgColorHex', 'fxOgEnable'],
+      ['fxIgColor', 'fxIgColorHex', 'fxIgEnable'],
+      ['fxIsColor', 'fxIsColorHex', 'fxIsEnable'],
+      ['fxTsColor', 'fxTsColorHex', 'fxTsEnable']
+    ].forEach(([inpId, hexId, enableId]) => {
+      const inp = $(inpId);
+      if (!inp) return;
+      const onPick = (commit) => {
+        if ($(hexId)) $(hexId).textContent = inp.value;
+        if ($(enableId) && !$(enableId).checked) $(enableId).checked = true;
+        dispatchEffectsFromUI(!commit, commit);
+      };
+      inp.addEventListener('input', () => onPick(false));
+      inp.addEventListener('change', () => onPick(true));
+    });
+
+    wireDropdownToggle('ddFxBlend', (menu) => {
+      populateSimpleDropdown(menu, FX_BLEND_MODES, activeFxBlendMode, (picked) => {
+        activeFxBlendMode = picked;
+        if ($('ddFxBlendLabel')) $('ddFxBlendLabel').textContent = picked;
+        dispatchEffectsFromUI(false, true);
+      });
+    });
+  }
+
   function populateInspectorFromSelection() {
     const sel = state.selection;
     $('selectionSummary').textContent = sel.summary || `${state.artboardWidth} × ${state.artboardHeight} Artboard`;
     syncTopCornerControlBar();
+    syncEffectsBarAndPopover();
 
     const p = sel.props;
     if (!p) {
@@ -2559,6 +2941,7 @@
     { label: 'Type Tool — Direct In-Group Text Edit (T)', run: () => setActiveTool('text') },
     { label: 'Eyedropper — Pick Fill, Gradient & Stroke (I)', run: () => setActiveTool('eyedropper') },
     { label: 'Unfill / No Paint on Active Fill or Stroke (/)', run: () => applyUnfillToActiveProxy() },
+    { label: 'Open Web Effects Panel (Drop Shadow, Blur, Glow, Glass)', run: () => openEffectsPopover($('btnEffectsPopover')) },
     { label: 'Exit Group Isolation Mode (Esc)', run: () => postToBridge('exit_isolation', { exitAll: false }) },
     { label: 'Open Links Inspector Tab (All Buttons & URLs)', run: () => switchInspectorTab('links') },
     { label: 'Compute Engine: Auto (GPU-First -> CPU Fallback)', run: () => setAccelerationPreference('auto') },
@@ -2630,6 +3013,8 @@
     $('btnModeLive').classList.toggle('active', state.mode === 'live');
     $('btnModeEdit').classList.toggle('active', state.mode === 'edit');
     $('workspaceRoot').classList.toggle('live-mode', state.mode === 'live');
+    if (state.mode === 'live') closeEffectsPopover();
+    if ($('effectsControlBar')) $('effectsControlBar').hidden = state.mode !== 'edit';
     syncHostCanvasCursor();
     postToBridge('set_mode', { mode: state.mode });
     setTimeout(updateMinimap, 60);
@@ -4109,6 +4494,7 @@
         closeAllDropdowns();
         hideContextMenu();
         closeCustomColorPopover();
+        closeEffectsPopover();
         $('cmdPaletteModal').hidden = true;
         $('prefsModal').hidden = true;
         $('shortcutsModal').hidden = true;
@@ -4620,5 +5006,6 @@
   wireAllScrubbyNumberFields();
   wirePaintControls();
   wireCustomColorPopover();
+  wireEffectsPopover();
   bootStudio();
 })();
