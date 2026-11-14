@@ -119,6 +119,27 @@
     return openTagHtml.replace(/(\s*\/?)>$/, ` style="${serialized}"$1>`);
   }
 
+  function mergeAttrsIntoOpenTag(openTagHtml, attrsObj) {
+    let out = openTagHtml;
+    for (const [rawName, rawVal] of Object.entries(attrsObj || {})) {
+      const attrName = String(rawName || '').trim();
+      if (!attrName || attrName.toLowerCase() === 'style') continue;
+      const attrRe = new RegExp(`\\s+${escapeRegExp(attrName)}(?:\\s*=\\s*(?:"[^"]*"|'[^']*'|[^\\s"'>]+))?`, 'ig');
+      if (rawVal === null || rawVal === undefined || String(rawVal) === '') {
+        out = out.replace(attrRe, '');
+      } else {
+        const safeVal = String(rawVal).replace(/"/g, '&quot;');
+        if (attrRe.test(out)) {
+          attrRe.lastIndex = 0;
+          out = out.replace(attrRe, ` ${attrName}="${safeVal}"`);
+        } else {
+          out = out.replace(/(\s*\/?)>$/, ` ${attrName}="${safeVal}"$1>`);
+        }
+      }
+    }
+    return out;
+  }
+
   function parseStaticHtmlTree(html) {
     const root = { tag: '#document', children: [], start: 0, end: html.length };
     const stack = [root];
@@ -391,6 +412,26 @@
       }
     }
 
+    const attrPatches = Array.isArray(payload.attrPatches) ? payload.attrPatches : [];
+    if (attrPatches.length) {
+      const treeA = parseStaticHtmlTree(htmlContent);
+      const attrEdits = [];
+      for (const ap of attrPatches) {
+        if (!ap || !ap.attrs || typeof ap.attrs !== 'object') continue;
+        const node = findNodeInTree(treeA, ap.id, ap.selector);
+        if (node) {
+          const openTagHtml = htmlContent.slice(node.start, node.openEnd);
+          const updatedOpenTag = mergeAttrsIntoOpenTag(openTagHtml, ap.attrs);
+          if (updatedOpenTag !== openTagHtml) {
+            attrEdits.push({ start: node.start, end: node.openEnd, replacement: updatedOpenTag });
+          }
+        }
+      }
+      if (attrEdits.length) {
+        htmlContent = applySurgicalReplacements(htmlContent, attrEdits);
+      }
+    }
+
     const insertedNodes = Array.isArray(payload.insertedNodes) ? payload.insertedNodes : [];
     for (const ins of insertedNodes) {
       if (!ins || !ins.cleanHtml) continue;
@@ -455,6 +496,7 @@
         deletedTargets.length ||
         textPatches.length ||
         stylePatches.length ||
+        attrPatches.length ||
         insertedNodes.length ||
         googleFonts.length ||
         (payload.themeCss && String(payload.themeCss).trim())
@@ -462,6 +504,7 @@
       counts: {
         stylePatchesApplied: stylePatches.length,
         textPatchesApplied: textPatches.length,
+        attrPatchesApplied: attrPatches.length,
         insertedNodesApplied: insertedNodes.length,
         deletedNodesApplied: deletedTargets.length,
         googleFontsApplied: googleFonts.length
@@ -529,6 +572,11 @@
           if (!key || typeof tp.after !== 'string') continue;
           elementSyncMap[key] = { ...(elementSyncMap[key] || {}), text: tp.after };
         }
+        for (const ap of Array.isArray(payload.attrPatches) ? payload.attrPatches : []) {
+          const key = ap.id ? `#${ap.id}` : ap.selector;
+          if (!key || !ap.attrs) continue;
+          elementSyncMap[key] = { ...(elementSyncMap[key] || {}), attrs: ap.attrs };
+        }
         const syncManifest = {
           entry: relEntry,
           artboard: projectMeta.artboard || { width: 1920, height: 1080 },
@@ -561,15 +609,35 @@
     };
   }
 
+  function rewriteCssAssetUrls(cssText, fromFile, assetUrls) {
+    if (!cssText || !assetUrls || !Object.keys(assetUrls).length) return cssText;
+    return String(cssText).replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/gi, (full, q, rawUrl) => {
+      const resolved = resolveRelativeAssetPath(fromFile, rawUrl.trim());
+      if (resolved && assetUrls[resolved]) {
+        return `url("${assetUrls[resolved]}")`;
+      }
+      return full;
+    });
+  }
+
   /**
    * Compiles a multi-file folder project (HTML + CSS + JS + Blob assets) into an executable document
    * for standalone preview (with bridge.js) OR clean full-page Publish in a new tab (without bridge.js).
    */
-  function compileStandaloneHtml({ entry, filesMap = {}, assetUrls = {}, studioBaseUrl = '', includeBridge = false }) {
+  function compileStandaloneHtml({
+    entry,
+    filesMap = {},
+    assetUrls = {},
+    studioBaseUrl = '',
+    includeBridge = false,
+    bypassEnabled = true,
+    accelMode = 'gpu'
+  }) {
     const relEntry = normalizeRelPath(entry || 'index.html');
     let html = String(filesMap[relEntry] ?? Object.values(filesMap)[0] ?? '<!doctype html><html><body></body></html>');
+    const inlinedJsSet = new Set();
 
-    // 1. Inline project <link rel="stylesheet" href="..."> from filesMap
+    // 1. Inline project <link rel="stylesheet" href="..."> from filesMap (rewriting CSS url() assets)
     html = html.replace(/<link\b([^>]*?)>/gi, (fullTag, attrs) => {
       if (!/\brel\s*=\s*["']?stylesheet["']?/i.test(attrs)) return fullTag;
       const hm = /\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i.exec(attrs);
@@ -577,12 +645,13 @@
       const href = hm[1] ?? hm[2] ?? hm[3] ?? '';
       const resolved = resolveRelativeAssetPath(relEntry, href);
       if (resolved && filesMap[resolved] !== undefined) {
-        return `<style data-vc-vfs-css="${resolved}">\n${filesMap[resolved]}\n</style>`;
+        const cssBody = rewriteCssAssetUrls(filesMap[resolved], resolved, assetUrls);
+        return `<style data-vc-vfs-css="${resolved}">\n${cssBody}\n</style>`;
       }
       return fullTag;
     });
 
-    // 2. Rewrite relative image/media src="..." against assetUrls if present
+    // 2. Rewrite relative image/media src="..." and inline <style> url(...) against assetUrls
     if (assetUrls && Object.keys(assetUrls).length) {
       html = html.replace(/\b(src|poster)\s*=\s*(["'])([^"']+)\2/gi, (full, attr, q, val) => {
         const resolved = resolveRelativeAssetPath(relEntry, val);
@@ -593,44 +662,242 @@
       });
     }
 
-    // 3. Inline project <script src="..."></script> from filesMap
-    html = html.replace(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi, (fullTag, attrs, body) => {
+    // 3. Inline project <script src="..."></script> from filesMap (preserving defer & escaping </script)
+    html = html.replace(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi, (fullTag, attrs) => {
       const sm = /\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i.exec(attrs);
       if (!sm) return fullTag;
       const srcVal = sm[1] ?? sm[2] ?? sm[3] ?? '';
       const resolved = resolveRelativeAssetPath(relEntry, srcVal);
       if (resolved && filesMap[resolved] !== undefined) {
+        inlinedJsSet.add(resolved);
         const isMod = /\btype\s*=\s*["']?module["']?/i.test(attrs);
-        return `<script${isMod ? ' type="module"' : ''} data-vc-vfs-js="${resolved}">\n${filesMap[resolved]}\n</script>`;
+        const isDefer = !isMod && /\bdefer\b/i.test(attrs);
+        const safeJs = String(filesMap[resolved]).replace(/<\/script/gi, '<\\/script');
+        const wrappedJs = isDefer
+          ? `(function(){var __vcRun=function(){\n${safeJs}\n};if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',__vcRun,{once:true});}else{__vcRun();}})();`
+          : safeJs;
+        return `<script${isMod ? ' type="module"' : ''} data-vc-vfs-js="${resolved}">\n${wrappedJs}\n</script>`;
       }
       return fullTag;
     });
 
+    // 4. Build VFS Runtime Dictionary for dynamic <script src="video.js">, relative fetch(), & local button/page links
+    const allPages = Object.keys(filesMap).filter((k) => /\.html?$/i.test(k));
+    const runtimeTextFiles = {};
+    for (const [k, content] of Object.entries(filesMap)) {
+      if (/\.html?$/i.test(k)) {
+        if (!includeBridge && k !== relEntry) runtimeTextFiles[k] = content;
+        continue;
+      }
+      if (!inlinedJsSet.has(k)) {
+        runtimeTextFiles[k] = content;
+      }
+    }
+    const safeVfsJson = JSON.stringify({
+      entry: relEntry,
+      pages: allPages,
+      files: runtimeTextFiles,
+      assets: assetUrls || {},
+      includeBridge: Boolean(includeBridge)
+    }).replace(/<\/script/gi, '<\\/script');
+
+    const vfsBootScript = `\n<script data-vc-bridge="true">
+(function(){
+  window.__VC_BYPASS_INIT__ = ${Boolean(bypassEnabled)};
+  window.__VC_ACCEL_INIT__ = ${JSON.stringify(accelMode || 'gpu')};
+  try { document.documentElement.setAttribute('data-vc-accel', window.__VC_ACCEL_INIT__); } catch(_) {}
+  var VFS = window.__VC_VFS__ = ${safeVfsJson};
+  var blobCache = {};
+  function normPath(p) {
+    return String(p || '').replace(/\\\\/g, '/').replace(/^(?:\\.\\/)+/, '').replace(/^\\/+/, '').trim();
+  }
+  function resolveRel(relHref) {
+    if (!relHref || /^(?:https?:|data:|blob:|mailto:|tel:|javascript:|\\/__vc_)/i.test(relHref)) return null;
+    var clean = String(relHref).split('#')[0].split('?')[0];
+    if (!clean) return '';
+    if (clean.charAt(0) === '/') return normPath(clean);
+    var parts = normPath(VFS.entry || 'index.html').split('/');
+    parts.pop();
+    var segs = clean.split('/');
+    for (var i = 0; i < segs.length; i++) {
+      var s = segs[i];
+      if (!s || s === '.') continue;
+      if (s === '..') parts.pop(); else parts.push(s);
+    }
+    return parts.join('/');
+  }
+  function getVfsBlobUrl(resolved) {
+    if (VFS.assets && VFS.assets[resolved]) return VFS.assets[resolved];
+    if (blobCache[resolved]) return blobCache[resolved];
+    if (VFS.files && Object.prototype.hasOwnProperty.call(VFS.files, resolved)) {
+      var mime = /\\.m?js$/i.test(resolved) ? 'application/javascript' : /\\.css$/i.test(resolved) ? 'text/css' : /\\.json$/i.test(resolved) ? 'application/json' : /\\.svg$/i.test(resolved) ? 'image/svg+xml' : 'text/plain';
+      blobCache[resolved] = URL.createObjectURL(new Blob([VFS.files[resolved]], { type: mime }));
+      return blobCache[resolved];
+    }
+    return null;
+  }
+  function rewriteDynamicNode(node) {
+    if (!node || node.nodeType !== 1 || node.hasAttribute('data-vc-bridge')) return;
+    var tag = (node.tagName || '').toLowerCase();
+    if (tag === 'script') {
+      var rawSrc = node.getAttribute('src') || '';
+      var res = resolveRel(rawSrc);
+      if (res) {
+        var bUrl = getVfsBlobUrl(res);
+        if (bUrl && rawSrc !== bUrl) node.setAttribute('src', bUrl);
+      }
+    } else if (tag === 'img' || tag === 'video' || tag === 'audio' || tag === 'source') {
+      var rawMedia = node.getAttribute('src') || '';
+      var resM = resolveRel(rawMedia);
+      if (resM && VFS.assets && VFS.assets[resM] && rawMedia !== VFS.assets[resM]) {
+        node.setAttribute('src', VFS.assets[resM]);
+      }
+    } else if (tag === 'link' && /stylesheet/i.test(node.getAttribute('rel') || '')) {
+      var rawHref = node.getAttribute('href') || '';
+      var resCss = resolveRel(rawHref);
+      if (resCss) {
+        var cUrl = getVfsBlobUrl(resCss);
+        if (cUrl && rawHref !== cUrl) node.setAttribute('href', cUrl);
+      }
+    }
+  }
+  try {
+    var origAppend = Node.prototype.appendChild;
+    Node.prototype.appendChild = function(ch) { rewriteDynamicNode(ch); return origAppend.call(this, ch); };
+    var origInsert = Node.prototype.insertBefore;
+    Node.prototype.insertBefore = function(ch, ref) { rewriteDynamicNode(ch); return origInsert.call(this, ch, ref); };
+    var scriptSrcDesc = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src');
+    if (scriptSrcDesc && scriptSrcDesc.set) {
+      Object.defineProperty(HTMLScriptElement.prototype, 'src', {
+        configurable: true,
+        enumerable: true,
+        get: scriptSrcDesc.get,
+        set: function(val) {
+          var res = resolveRel(val);
+          var bUrl = res ? getVfsBlobUrl(res) : null;
+          return scriptSrcDesc.set.call(this, bUrl || val);
+        }
+      });
+    }
+  } catch(_) {}
+  if (typeof window.fetch === 'function') {
+    var vfsOrigFetch = window.fetch.bind(window);
+    window.fetch = function(input, init) {
+      var u = typeof input === 'string' ? input : (input && input.url) || '';
+      var res = resolveRel(u);
+      if (res && VFS.files && Object.prototype.hasOwnProperty.call(VFS.files, res)) {
+        var ct = /\\.json$/i.test(res) ? 'application/json' : /\\.m?js$/i.test(res) ? 'application/javascript' : 'text/plain';
+        return Promise.resolve(new Response(VFS.files[res], { status: 200, headers: { 'Content-Type': ct } }));
+      }
+      return vfsOrigFetch(input, init);
+    };
+  }
+  function findMatchingPage(rawTarget) {
+    if (!rawTarget || /^(?:https?:|mailto:|tel:|data:|blob:|javascript:)/i.test(rawTarget)) return null;
+    var hashIdx = rawTarget.indexOf('#');
+    var hashPart = hashIdx >= 0 ? rawTarget.slice(hashIdx) : '';
+    var pathPart = (hashIdx >= 0 ? rawTarget.slice(0, hashIdx) : rawTarget).split('?')[0].trim();
+    if (!pathPart) return hashPart ? { page: '', hash: hashPart } : null;
+    var cand = resolveRel(pathPart);
+    if (!cand) return null;
+    var pages = VFS.pages || [];
+    var exact = pages.find(function(p){ return p.toLowerCase() === cand.toLowerCase(); });
+    if (!exact) {
+      var withHtml = cand.replace(/\\/+$/, '') + '.html';
+      exact = pages.find(function(p){ return p.toLowerCase() === withHtml.toLowerCase(); });
+    }
+    if (!exact) {
+      var baseOnly = cand.split('/').pop().toLowerCase();
+      exact = pages.find(function(p){ return p.split('/').pop().toLowerCase() === baseOnly || p.split('/').pop().toLowerCase() === baseOnly + '.html'; });
+    }
+    if (exact || /\\.html?$/i.test(cand)) {
+      return { page: exact || cand, hash: hashPart };
+    }
+    return null;
+  }
+  function activateInPageHash(hashStr) {
+    if (!hashStr || hashStr === '#') return false;
+    var id = decodeURIComponent(hashStr.replace(/^#/, ''));
+    var el = document.getElementById(id) || document.querySelector('[name="' + id.replace(/"/g, '') + '"]');
+    if (!el) return false;
+    var cur = el;
+    while (cur && cur !== document.body) {
+      if (cur.hidden) cur.hidden = false;
+      if (cur.classList && cur.classList.contains('is-hidden')) cur.classList.remove('is-hidden');
+      cur = cur.parentElement;
+    }
+    try { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch(_) { el.scrollIntoView(); }
+    return true;
+  }
+  window.__vcNavigateLocal = function(rawTarget) {
+    var match = findMatchingPage(rawTarget);
+    if (!match) return false;
+    if ((!match.page || match.page === VFS.entry) && match.hash) {
+      return activateInPageHash(match.hash);
+    }
+    if (match.page) {
+      if (window.parent && window.parent !== window && VFS.includeBridge) {
+        window.parent.postMessage({ __vc: true, type: 'vc_vfs_navigate', href: match.page, hash: match.hash || '' }, '*');
+        return true;
+      }
+      if (VFS.files && VFS.files[match.page]) {
+        var nextBlob = URL.createObjectURL(new Blob([VFS.files[match.page]], { type: 'text/html;charset=utf-8' }));
+        window.location.href = nextBlob + (match.hash || '');
+        return true;
+      }
+    }
+    return false;
+  };
+  var origWinOpen = window.open ? window.open.bind(window) : null;
+  window.open = function(url, target, features) {
+    if (url && window.__vcNavigateLocal(String(url))) return window;
+    return origWinOpen ? origWinOpen(url, target, features) : null;
+  };
+  document.addEventListener('click', function(ev) {
+    if (document.documentElement.classList.contains('__vc_edit_mode__')) return;
+    var t = ev.target && ev.target.closest ? ev.target.closest('a[href], [data-vc-link], [data-href], [data-url], [data-page], button[formaction], [onclick]') : null;
+    if (!t) return;
+    var targetHref = t.getAttribute('data-vc-link') || t.getAttribute('href') || t.getAttribute('data-href') || t.getAttribute('data-url') || t.getAttribute('data-page') || t.getAttribute('formaction') || '';
+    if (!targetHref && t.hasAttribute('onclick')) {
+      var oc = t.getAttribute('onclick') || '';
+      var m = /(?:location(?:\\.href)?\\s*=\\s*|location\\.(?:assign|replace)\\s*\\(\\s*|window\\.open\\s*\\(\\s*)(['"])([^'"]+)\\1/i.exec(oc);
+      if (m) targetHref = m[2];
+    }
+    if (targetHref && window.__vcNavigateLocal(targetHref)) {
+      ev.preventDefault();
+      ev.stopImmediatePropagation();
+    }
+  }, true);
+  document.addEventListener('submit', function(ev) {
+    if (document.documentElement.classList.contains('__vc_edit_mode__')) return;
+    var form = ev.target;
+    var act = form && form.getAttribute ? (form.getAttribute('action') || '') : '';
+    if (act && window.__vcNavigateLocal(act)) {
+      ev.preventDefault();
+    }
+  }, true);
+})();
+</script>\n`;
+
     if (includeBridge && studioBaseUrl) {
       const baseClean = studioBaseUrl.replace(/\/+$/, '');
-      const preTag = `\n<script src="${baseClean}/prebypass.js" data-vc-bridge="true"></script>\n`;
+      const preTag = `${vfsBootScript}<script src="${baseClean}/prebypass.js" data-vc-bridge="true"></script>\n`;
       if (/<head[^>]*>/i.test(html)) {
         html = html.replace(/<head[^>]*>/i, (m) => `${m}${preTag}`);
       } else {
         html = preTag + html;
       }
-      const navIntercept = `\n<script data-vc-bridge="true">
-        document.addEventListener('click', function(ev) {
-          var a = ev.target && ev.target.closest ? ev.target.closest('a[href]') : null;
-          if (!a) return;
-          var href = a.getAttribute('href') || '';
-          if (/\\.html?(?:[?#].*)?$/i.test(href) && !/^https?:/i.test(href)) {
-            ev.preventDefault();
-            if (window.parent && window.parent !== window) {
-              window.parent.postMessage({ __vc: true, type: 'vc_vfs_navigate', href: href }, '*');
-            }
-          }
-        });
-      </script>\n<script src="${baseClean}/bridge.js" data-vc-bridge="true"></script>\n`;
+      const bridgeTag = `\n<script src="${baseClean}/bridge.js" data-vc-bridge="true"></script>\n`;
       if (/<\/body>/i.test(html)) {
-        html = html.replace(/<\/body>/i, `${navIntercept}</body>`);
+        html = html.replace(/<\/body>/i, `${bridgeTag}</body>`);
       } else {
-        html += navIntercept;
+        html += bridgeTag;
+      }
+    } else {
+      if (/<head[^>]*>/i.test(html)) {
+        html = html.replace(/<head[^>]*>/i, (m) => `${m}${vfsBootScript}`);
+      } else {
+        html = vfsBootScript + html;
       }
     }
 
@@ -660,8 +927,8 @@
     <nav class="nav-links" id="mainNav">
       <a href="index.html" class="nav-link active">Overview</a>
       <a href="about.html" class="nav-link">Specs &amp; Sessions</a>
-      <button type="button" class="btn-secondary" id="btnSecondaryAction">Preview Specs</button>
-      <button type="button" class="btn-primary" id="btnPrimaryCta">Launch Workspace</button>
+      <button type="button" class="btn-secondary" id="btnSecondaryAction" data-vc-link="about.html">Preview Specs</button>
+      <button type="button" class="btn-primary" id="btnPrimaryCta" data-vc-link="#featuresSession">Launch Workspace</button>
     </nav>
   </header>
 
@@ -949,7 +1216,9 @@ body {
   }
 
   if (!canvas) return;
-  const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+  const preferCpu = document.documentElement.getAttribute('data-vc-accel') === 'cpu';
+  const gl = !preferCpu ? (canvas.getContext('webgl') || canvas.getContext('experimental-webgl')) : null;
+  const ctx2d = !gl ? canvas.getContext('2d') : null;
 
   canvas.addEventListener('pointerdown', (e) => {
     dragging = true;
@@ -965,11 +1234,38 @@ body {
   function renderFrame() {
     yawDeg = (yawDeg + 0.35) % 360;
     if (angleBadge) angleBadge.textContent = 'Yaw ' + Math.round(yawDeg) + '°';
+    const t = (yawDeg * Math.PI) / 180;
     if (gl) {
-      const t = (yawDeg * Math.PI) / 180;
       gl.viewport(0, 0, canvas.width, canvas.height);
       gl.clearColor(0.08 + 0.04 * Math.sin(t), 0.07, 0.06, 1.0);
       gl.clear(gl.COLOR_BUFFER_BIT);
+    } else if (ctx2d) {
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx2d.fillStyle = '#141312';
+      ctx2d.fillRect(0, 0, w, h);
+      ctx2d.strokeStyle = '#f97316';
+      ctx2d.lineWidth = 2;
+      const cx = w * 0.5;
+      const cy = h * 0.5;
+      const rx = 96;
+      const ry = 42;
+      ctx2d.beginPath();
+      for (let i = 0; i < 4; i++) {
+        const a1 = t + (i * Math.PI) / 2;
+        const a2 = t + ((i + 1) * Math.PI) / 2;
+        const x1 = cx + Math.cos(a1) * rx;
+        const y1 = cy - 42 + Math.sin(a1) * ry * 0.55;
+        const x2 = cx + Math.cos(a2) * rx;
+        const y2 = cy - 42 + Math.sin(a2) * ry * 0.55;
+        ctx2d.moveTo(x1, y1);
+        ctx2d.lineTo(x2, y2);
+        ctx2d.moveTo(x1, y1 + 84);
+        ctx2d.lineTo(x2, y2 + 84);
+        ctx2d.moveTo(x1, y1);
+        ctx2d.lineTo(x1, y1 + 84);
+      }
+      ctx2d.stroke();
     }
     requestAnimationFrame(renderFrame);
   }

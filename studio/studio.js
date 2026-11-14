@@ -139,12 +139,15 @@
     lockAspect: false,
     aspectRatio: 1,
     activePreset: 'original',
+    effectiveAccel: 'gpu',
+    gpuInfo: { webglAvailable: true, hasHardwareGpu: true, renderer: 'GPU Compositor', api: 'WebGL2' },
     preferences: {
       autoSave: false, // Manual Save ONLY when clicked by default!
       scaleStrokesAndEffects: true,
       scaleCorners: true,
       multiScaleMode: 'in-place', // 'in-place' | 'normal'
-      keyboardIncrement: 1
+      keyboardIncrement: 1,
+      accelPreference: 'auto' // 'auto' (GPU -> CPU fallback) | 'gpu' | 'cpu'
     },
     ignoredWords: [],
     notes: [],
@@ -153,6 +156,9 @@
     sessions: [],
     layers: [],
     domTree: [],
+    links: [],
+    isolation: { active: false, stack: [] },
+    pendingHashTarget: '',
     selection: { count: 0, selectedIds: [], props: null },
     grammarIssues: [],
 
@@ -210,16 +216,33 @@
     }
   }
 
+  function getProjectFolderKey(itemOrTarget, projName) {
+    const rawTarget = typeof itemOrTarget === 'object'
+      ? (itemOrTarget?.originalSourceDir || itemOrTarget?.target || '')
+      : (itemOrTarget || '');
+    const normTarget = String(rawTarget).replace(/\\/g, '/').replace(/\/+$/, '').trim().toLowerCase();
+    if (normTarget) return `dir::${normTarget}`;
+    const rawName = typeof itemOrTarget === 'object'
+      ? (itemOrTarget?.projectName || projName || '')
+      : (projName || '');
+    return `vfs::${String(rawName || 'project').trim().toLowerCase()}`;
+  }
+
   function recordLocalRecentSession(entryRel, projName, extra = {}) {
+    const resolvedProj = projName || state.projectName || 'Project';
+    const resolvedTarget = extra.target !== undefined ? extra.target : (state.targetPath || '');
+    const folderKey = getProjectFolderKey(resolvedTarget, resolvedProj);
+    const prevAll = loadLocalRecentSessions();
+    const prevSame = prevAll.find((x) => getProjectFolderKey(x) === folderKey);
     const item = {
-      id: `${projName || state.projectName}:${entryRel}`,
-      projectName: projName || state.projectName,
-      entry: entryRel || state.entry,
-      target: extra.target || state.targetPath || '',
-      vfsSnapshot: extra.saveSnapshot ? { ...state.projectFiles } : null,
+      id: folderKey,
+      projectName: resolvedProj,
+      entry: entryRel || state.entry || 'index.html',
+      target: resolvedTarget,
+      vfsSnapshot: extra.saveSnapshot ? { ...state.projectFiles } : (prevSame?.vfsSnapshot || null),
       openedAt: new Date().toISOString()
     };
-    const prev = loadLocalRecentSessions().filter((x) => !(x.projectName === item.projectName && x.entry === item.entry && x.target === item.target));
+    const prev = prevAll.filter((x) => getProjectFolderKey(x) !== folderKey);
     const next = [item, ...prev].slice(0, 15);
     state.recentSessions = next;
     try {
@@ -317,6 +340,7 @@
   window.addEventListener('click', () => {
     closeAllDropdowns();
     hideContextMenu();
+    closeCustomColorPopover();
   });
 
   function populateSimpleDropdown(menuEl, items, activeVal, onPick) {
@@ -344,6 +368,103 @@
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
+  }
+
+  // =========================================================================
+  // 1B. GPU-FIRST ACCELERATION WITH AUTOMATIC CPU FALLBACK ENGINE
+  // =========================================================================
+  function detectHardwareAcceleration() {
+    try {
+      const probe = document.createElement('canvas');
+      probe.width = 1;
+      probe.height = 1;
+      let api = 'WebGL2';
+      let gl = probe.getContext('webgl2', { powerPreference: 'high-performance', failIfMajorPerformanceCaveat: false });
+      if (!gl) {
+        api = 'WebGL1';
+        gl = probe.getContext('webgl', { powerPreference: 'high-performance', failIfMajorPerformanceCaveat: false }) ||
+          probe.getContext('experimental-webgl');
+      }
+      if (!gl) {
+        return {
+          webglAvailable: false,
+          hasHardwareGpu: false,
+          renderer: 'No WebGL — CPU Canvas2D Compositor',
+          api: 'Canvas2D'
+        };
+      }
+      let renderer = String(gl.getParameter(gl.RENDERER) || api);
+      try {
+        const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+        if (dbg) {
+          const unmasked = gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL);
+          if (unmasked) renderer = String(unmasked);
+        }
+      } catch (_) {}
+      // Release temporary WebGL probe context immediately so iframe 3D apps keep all context slots
+      try {
+        gl.getExtension('WEBGL_lose_context')?.loseContext();
+      } catch (_) {}
+
+      const isSoftwareRenderer = /swiftshader|llvmpipe|software|basic render driver|lavapipe/i.test(renderer);
+      return {
+        webglAvailable: true,
+        hasHardwareGpu: !isSoftwareRenderer,
+        renderer,
+        api
+      };
+    } catch (_) {
+      return {
+        webglAvailable: false,
+        hasHardwareGpu: false,
+        renderer: 'CPU 2D Fallback',
+        api: 'Canvas2D'
+      };
+    }
+  }
+
+  function syncAccelerationEngineUI() {
+    const pref = state.preferences.accelPreference || 'auto';
+    let effective = 'gpu';
+    if (pref === 'cpu') {
+      effective = 'cpu';
+    } else if (pref === 'gpu') {
+      effective = state.gpuInfo.webglAvailable ? 'gpu' : 'cpu';
+    } else {
+      effective = state.gpuInfo.hasHardwareGpu ? 'gpu' : 'cpu';
+    }
+    state.effectiveAccel = effective;
+    document.documentElement.setAttribute('data-vc-accel', effective);
+
+    const badge = $('accelModeBadge');
+    if (badge) {
+      badge.textContent = effective === 'gpu' ? 'GPU' : 'CPU';
+      badge.classList.toggle('is-cpu', effective === 'cpu');
+      badge.style.cursor = 'pointer';
+      badge.title = effective === 'gpu'
+        ? `GPU Accelerated (${state.gpuInfo.renderer}) · Pref: ${pref.toUpperCase()} — Click for Compute Settings`
+        : `CPU Fallback Active (${state.gpuInfo.renderer}) · Pref: ${pref.toUpperCase()} — Click for Compute Settings`;
+    }
+
+    if ($('prefBtnAccelAuto')) $('prefBtnAccelAuto').classList.toggle('active', pref === 'auto');
+    if ($('prefBtnAccelGpu')) $('prefBtnAccelGpu').classList.toggle('active', pref === 'gpu');
+    if ($('prefBtnAccelCpu')) $('prefBtnAccelCpu').classList.toggle('active', pref === 'cpu');
+
+    const statusEl = $('prefAccelStatusText');
+    if (statusEl) {
+      const modeDesc = effective === 'gpu' ? 'GPU Hardware Compositor active' : 'CPU 2D Fallback active (GPU unavailable or disabled)';
+      statusEl.textContent = `${modeDesc} · Detected: ${state.gpuInfo.renderer}`;
+    }
+
+    updateCanvasTransform();
+    postToBridge('set_accel_mode', { accelMode: effective });
+  }
+
+  function setAccelerationPreference(nextPref) {
+    const valid = ['auto', 'gpu', 'cpu'].includes(nextPref) ? nextPref : 'auto';
+    state.preferences.accelPreference = valid;
+    syncAccelerationEngineUI();
+    persistPreferences();
   }
 
   // =========================================================================
@@ -384,7 +505,11 @@
 
     const px = Math.round(state.panX * 100) / 100;
     const py = Math.round(state.panY * 100) / 100;
-    frameStage.style.transform = `translate3d(${px}px, ${py}px, 0) scale(${state.zoom})`;
+    if (state.effectiveAccel === 'cpu') {
+      frameStage.style.transform = `translate(${Math.round(px)}px, ${Math.round(py)}px) scale(${state.zoom})`;
+    } else {
+      frameStage.style.transform = `translate3d(${px}px, ${py}px, 0) scale(${state.zoom})`;
+    }
 
     // Never assign fixed pixel sizes to frameSizer — keeps workspace box fixed with zero side empty space pull!
     frameSizer.style.width = '';
@@ -820,6 +945,22 @@
       btn.classList.toggle('active', m === activeMode);
     });
 
+    // Sync Illustrator left toolbar mini mode buttons ([Solid] [Gradient] [None / Unfill])
+    const curSolidHex = isFill ? (p.fillColor || '#f97316') : (p.strokeColor || '#78716c');
+    if ($('dockMiniSolidChip')) {
+      $('dockMiniSolidChip').style.background = curSolidHex;
+    }
+    if ($('btnDockModeSolid')) {
+      $('btnDockModeSolid').classList.toggle('active', activeMode === 'solid');
+    }
+    if ($('btnDockModeGrad')) {
+      $('btnDockModeGrad').classList.toggle('active', isFill && (activeMode === 'linear' || activeMode === 'radial'));
+      $('btnDockModeGrad').style.opacity = isFill ? '1' : '0.45';
+    }
+    if ($('btnDockModeNone')) {
+      $('btnDockModeNone').classList.toggle('active', activeMode === 'none');
+    }
+
     const showGrad = isFill && (p.fillMode === 'linear' || p.fillMode === 'radial');
     // Keep solid color picker & quick swatches accessible even when Fill/Stroke is 'none' so picking a color immediately activates Solid!
     $('paintSolidPane').hidden = showGrad;
@@ -902,10 +1043,92 @@
   function applyActiveGradientToSelection(previewOnly = false, commitScrub = true) {
     const grad = buildCssGradientFromState();
     postToBridge('patch_style', {
-      props: { backgroundImage: grad, backgroundColor: 'transparent' },
+      props: { background: null, backgroundImage: grad, backgroundColor: 'transparent' },
       previewOnly,
       commitScrub
     });
+  }
+
+  function applyUnfillToActiveProxy() {
+    if (state.activeProxy === 'fill') {
+      state.paint.fillMode = 'none';
+      syncPaintProxiesUI();
+      postToBridge('patch_style', {
+        unfillTarget: 'fill',
+        props: { background: 'none', backgroundImage: 'none', backgroundColor: 'transparent' },
+        previewOnly: false,
+        commitScrub: true
+      });
+    } else {
+      state.paint.strokeMode = 'none';
+      state.paint.strokeWidth = 0;
+      if ($('propBorderWidth')) $('propBorderWidth').value = '0px';
+      syncPaintProxiesUI();
+      postToBridge('patch_style', {
+        unfillTarget: 'stroke',
+        props: { border: 'none', borderWidth: '0px', borderColor: 'transparent' },
+        previewOnly: false,
+        commitScrub: true
+      });
+    }
+  }
+
+  function applyDefaultFillAndStroke() {
+    state.paint.fillMode = 'solid';
+    state.paint.fillColor = '#ece9e5';
+    state.paint.strokeMode = 'solid';
+    state.paint.strokeColor = '#292524';
+    state.paint.strokeWidth = 1;
+    state.paint.strokeStyle = 'solid';
+    if ($('propBorderWidth')) $('propBorderWidth').value = '1px';
+    if ($('ddStrokeStyleLabel')) $('ddStrokeStyleLabel').textContent = 'solid';
+    syncPaintProxiesUI();
+    postToBridge('patch_style', {
+      props: {
+        background: null,
+        backgroundImage: 'none',
+        backgroundColor: '#ece9e5',
+        border: null,
+        borderWidth: '1px',
+        borderStyle: 'solid',
+        borderColor: '#292524'
+      },
+      previewOnly: false,
+      commitScrub: true
+    });
+  }
+
+  function applyPaintModeChoice(m) {
+    if (m === 'none') {
+      applyUnfillToActiveProxy();
+      return;
+    }
+    if (state.activeProxy === 'stroke' && (m === 'linear' || m === 'radial')) {
+      state.activeProxy = 'fill';
+    }
+    if (state.activeProxy === 'fill') {
+      state.paint.fillMode = m;
+      syncPaintProxiesUI();
+      if (m === 'solid') {
+        postToBridge('patch_style', {
+          props: { background: null, backgroundImage: 'none', backgroundColor: state.paint.fillColor },
+          commitScrub: true
+        });
+      } else {
+        renderGradientEditorUI();
+        applyActiveGradientToSelection(false, true);
+      }
+    } else {
+      state.paint.strokeMode = 'solid';
+      const bw = state.paint.strokeWidth || 1;
+      state.paint.strokeWidth = bw;
+      if ($('propBorderWidth')) $('propBorderWidth').value = `${bw}px`;
+      syncPaintProxiesUI();
+      postToBridge('patch_style', {
+        props: { borderWidth: `${bw}px`, borderStyle: state.paint.strokeStyle || 'solid', borderColor: state.paint.strokeColor },
+        commitScrub: true
+      });
+    }
   }
 
   function swapFillAndStroke() {
@@ -921,6 +1144,7 @@
     syncPaintProxiesUI();
     postToBridge('patch_style', {
       props: {
+        background: 'none',
         backgroundImage: 'none',
         backgroundColor: state.paint.fillColor,
         borderColor: state.paint.strokeColor,
@@ -932,58 +1156,407 @@
     });
   }
 
+  // =========================================================================
+  // 4B. CUSTOM WARM GREY STONE + ORANGE COLOR PICKER POPOVER (#vcColorPopover)
+  // Replaces native OS/Chromium rainbow <input type="color"> popup completely!
+  // =========================================================================
+  const cpState = {
+    open: false,
+    targetInput: null,
+    allowUnfill: false,
+    h: 24,
+    s: 0.91,
+    v: 0.98,
+    dirtyPreview: false
+  };
+
+  function cpHexToRgb(hex) {
+    let s = String(hex || '').trim().replace(/^#/, '');
+    if (s.length === 3) s = s.split('').map((c) => c + c).join('');
+    if (!/^[0-9a-f]{6}$/i.test(s)) return { r: 249, g: 115, b: 22 };
+    return {
+      r: parseInt(s.slice(0, 2), 16),
+      g: parseInt(s.slice(2, 4), 16),
+      b: parseInt(s.slice(4, 6), 16)
+    };
+  }
+
+  function cpRgbToHex(r, g, b) {
+    const clamp = (n) => Math.max(0, Math.min(255, Math.round(Number(n) || 0)));
+    const toH = (n) => clamp(n).toString(16).padStart(2, '0');
+    return `#${toH(r)}${toH(g)}${toH(b)}`;
+  }
+
+  function cpRgbToHsv(r, g, b) {
+    const rn = r / 255;
+    const gn = g / 255;
+    const bn = b / 255;
+    const max = Math.max(rn, gn, bn);
+    const min = Math.min(rn, gn, bn);
+    const d = max - min;
+    let h = 0;
+    if (d > 0.00001) {
+      if (max === rn) h = 60 * (((gn - bn) / d) % 6);
+      else if (max === gn) h = 60 * ((bn - rn) / d + 2);
+      else h = 60 * ((rn - gn) / d + 4);
+      if (h < 0) h += 360;
+    }
+    const s = max === 0 ? 0 : d / max;
+    return { h, s, v: max };
+  }
+
+  function cpHsvToRgb(h, s, v) {
+    const hh = ((Number(h) % 360) + 360) % 360;
+    const ss = Math.max(0, Math.min(1, Number(s)));
+    const vv = Math.max(0, Math.min(1, Number(v)));
+    const c = vv * ss;
+    const x = c * (1 - Math.abs(((hh / 60) % 2) - 1));
+    const m = vv - c;
+    let r1 = 0; let g1 = 0; let b1 = 0;
+    if (hh < 60) { r1 = c; g1 = x; }
+    else if (hh < 120) { r1 = x; g1 = c; }
+    else if (hh < 180) { g1 = c; b1 = x; }
+    else if (hh < 240) { g1 = x; b1 = c; }
+    else if (hh < 300) { r1 = x; b1 = c; }
+    else { r1 = c; b1 = x; }
+    return {
+      r: Math.round((r1 + m) * 255),
+      g: Math.round((g1 + m) * 255),
+      b: Math.round((b1 + m) * 255)
+    };
+  }
+
+  function renderCustomColorPopoverUI() {
+    const pop = $('vcColorPopover');
+    if (!pop || pop.hidden) return;
+    const rgb = cpHsvToRgb(cpState.h, cpState.s, cpState.v);
+    const hex = cpRgbToHex(rgb.r, rgb.g, rgb.b);
+    const pureRgb = cpHsvToRgb(cpState.h, 1, 1);
+    const pureHex = cpRgbToHex(pureRgb.r, pureRgb.g, pureRgb.b);
+
+    const cvs = $('vcCpSvCanvas');
+    if (cvs) {
+      const ctx = cvs.getContext('2d');
+      if (ctx) {
+        const w = cvs.width || 216;
+        const h = cvs.height || 128;
+        ctx.clearRect(0, 0, w, h);
+        ctx.fillStyle = pureHex;
+        ctx.fillRect(0, 0, w, h);
+
+        const gradW = ctx.createLinearGradient(0, 0, w, 0);
+        gradW.addColorStop(0, 'rgba(255,255,255,1)');
+        gradW.addColorStop(1, 'rgba(255,255,255,0)');
+        ctx.fillStyle = gradW;
+        ctx.fillRect(0, 0, w, h);
+
+        const gradB = ctx.createLinearGradient(0, 0, 0, h);
+        gradB.addColorStop(0, 'rgba(0,0,0,0)');
+        gradB.addColorStop(1, 'rgba(0,0,0,1)');
+        ctx.fillStyle = gradB;
+        ctx.fillRect(0, 0, w, h);
+      }
+    }
+
+    const svThumb = $('vcCpSvThumb');
+    if (svThumb) {
+      svThumb.style.left = `${Math.round(cpState.s * 1000) / 10}%`;
+      svThumb.style.top = `${Math.round((1 - cpState.v) * 1000) / 10}%`;
+      svThumb.style.background = hex;
+    }
+    const hueThumb = $('vcCpHueThumb');
+    if (hueThumb) {
+      hueThumb.style.left = `${Math.round((cpState.h / 360) * 1000) / 10}%`;
+      hueThumb.style.background = pureHex;
+    }
+    if ($('vcCpPreviewChip')) $('vcCpPreviewChip').style.background = hex;
+
+    if ($('vcCpHex') && document.activeElement !== $('vcCpHex')) $('vcCpHex').value = hex;
+    if ($('vcCpR') && document.activeElement !== $('vcCpR')) $('vcCpR').value = String(rgb.r);
+    if ($('vcCpG') && document.activeElement !== $('vcCpG')) $('vcCpG').value = String(rgb.g);
+    if ($('vcCpB') && document.activeElement !== $('vcCpB')) $('vcCpB').value = String(rgb.b);
+  }
+
+  function pushCustomPickerColorToTarget(commit = false) {
+    const inp = cpState.targetInput;
+    if (!inp) return;
+    const rgb = cpHsvToRgb(cpState.h, cpState.s, cpState.v);
+    const hex = cpRgbToHex(rgb.r, rgb.g, rgb.b);
+    inp.value = hex;
+    inp.dispatchEvent(new Event('input', { bubbles: true }));
+    if (commit) {
+      inp.dispatchEvent(new Event('change', { bubbles: true }));
+      cpState.dirtyPreview = false;
+    } else {
+      cpState.dirtyPreview = true;
+    }
+  }
+
+  function closeCustomColorPopover() {
+    const pop = $('vcColorPopover');
+    if (!pop || pop.hidden) return;
+    if (cpState.dirtyPreview && cpState.targetInput) {
+      cpState.targetInput.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    cpState.dirtyPreview = false;
+    cpState.open = false;
+    cpState.targetInput = null;
+    pop.hidden = true;
+  }
+
+  function openCustomColorPopover(targetInput, anchorEl = null) {
+    const pop = $('vcColorPopover');
+    if (!pop || !targetInput) return;
+
+    closeAllDropdowns();
+    hideContextMenu();
+
+    cpState.targetInput = targetInput;
+    cpState.open = true;
+    cpState.dirtyPreview = false;
+    cpState.allowUnfill = targetInput.id === 'activePaintPicker';
+
+    const titleMap = {
+      inpPrimaryColor: 'Primary Color',
+      inpSecondaryColor: 'Secondary Color',
+      activePaintPicker: state.activeProxy === 'stroke' ? 'Stroke Color' : 'Fill Color',
+      gradStopColor: 'Gradient Stop Color',
+      propColorPicker: 'Text Color'
+    };
+    if ($('vcCpTitle')) {
+      $('vcCpTitle').textContent = titleMap[targetInput.id] || 'Color Picker';
+    }
+    if ($('vcCpUnfill')) $('vcCpUnfill').hidden = !cpState.allowUnfill;
+    const noneSw = pop.querySelector('.vcp-sw-none');
+    if (noneSw) noneSw.hidden = !cpState.allowUnfill;
+
+    const initialHex = targetInput.value || '#f97316';
+    const rgb = cpHexToRgb(initialHex);
+    const hsv = cpRgbToHsv(rgb.r, rgb.g, rgb.b);
+    if (hsv.s > 0.01) cpState.h = hsv.h;
+    cpState.s = hsv.s;
+    cpState.v = hsv.v;
+
+    pop.hidden = false;
+    renderCustomColorPopoverUI();
+
+    const refEl = anchorEl || targetInput.closest('.color-chip, .color-field') || targetInput;
+    const rect = refEl.getBoundingClientRect();
+    const popW = pop.offsetWidth || 236;
+    const popH = pop.offsetHeight || 262;
+
+    let left = rect.left;
+    let top = rect.bottom + 6;
+    // If anchored on left toolbar dock, place to the right of the dock
+    if (rect.left < 90) {
+      left = rect.right + 8;
+      top = Math.min(window.innerHeight - popH - 10, Math.max(44, rect.top - 40));
+    } else {
+      if (left + popW > window.innerWidth - 10) {
+        left = Math.max(10, window.innerWidth - popW - 10);
+      }
+      if (top + popH > window.innerHeight - 10) {
+        top = Math.max(44, rect.top - popH - 6);
+      }
+    }
+    pop.style.left = `${Math.round(left)}px`;
+    pop.style.top = `${Math.round(top)}px`;
+  }
+
+  function wireCustomColorPopover() {
+    const pop = $('vcColorPopover');
+    if (!pop) return;
+
+    pop.addEventListener('click', (ev) => ev.stopPropagation());
+    pop.addEventListener('mousedown', (ev) => ev.stopPropagation());
+
+    // Intercept ALL native <input type="color"> clicks/keys so OS color dialog NEVER appears!
+    document.querySelectorAll('input[type="color"]').forEach((inp) => {
+      inp.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (cpState.open && cpState.targetInput === inp) {
+          closeCustomColorPopover();
+        } else {
+          openCustomColorPopover(inp, inp.closest('.color-chip, .color-field') || inp);
+        }
+      });
+      inp.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') {
+          ev.preventDefault();
+          ev.stopPropagation();
+          openCustomColorPopover(inp, inp.closest('.color-chip, .color-field') || inp);
+        }
+      });
+    });
+
+    if ($('vcCpClose')) {
+      $('vcCpClose').addEventListener('click', () => closeCustomColorPopover());
+    }
+    if ($('vcCpEyedropper')) {
+      $('vcCpEyedropper').addEventListener('click', () => {
+        closeCustomColorPopover();
+        setActiveTool('eyedropper');
+      });
+    }
+    if ($('vcCpUnfill')) {
+      $('vcCpUnfill').addEventListener('click', () => {
+        applyUnfillToActiveProxy();
+        cpState.dirtyPreview = false;
+        closeCustomColorPopover();
+      });
+    }
+
+    const svWrap = $('vcCpSvWrap');
+    if (svWrap) {
+      const pickSv = (ev, commit) => {
+        const r = svWrap.getBoundingClientRect();
+        cpState.s = Math.max(0, Math.min(1, (ev.clientX - r.left) / Math.max(1, r.width)));
+        cpState.v = Math.max(0, Math.min(1, 1 - (ev.clientY - r.top) / Math.max(1, r.height)));
+        renderCustomColorPopoverUI();
+        pushCustomPickerColorToTarget(commit);
+      };
+      svWrap.addEventListener('mousedown', (ev) => {
+        if (ev.button !== 0) return;
+        ev.preventDefault();
+        pickSv(ev, false);
+        const onMove = (mev) => pickSv(mev, false);
+        const onUp = (uev) => {
+          window.removeEventListener('mousemove', onMove);
+          window.removeEventListener('mouseup', onUp);
+          pickSv(uev, true);
+        };
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+      });
+    }
+
+    const hueTrack = $('vcCpHueTrack');
+    if (hueTrack) {
+      const pickHue = (ev, commit) => {
+        const r = hueTrack.getBoundingClientRect();
+        cpState.h = Math.max(0, Math.min(360, ((ev.clientX - r.left) / Math.max(1, r.width)) * 360));
+        renderCustomColorPopoverUI();
+        pushCustomPickerColorToTarget(commit);
+      };
+      hueTrack.addEventListener('mousedown', (ev) => {
+        if (ev.button !== 0) return;
+        ev.preventDefault();
+        pickHue(ev, false);
+        const onMove = (mev) => pickHue(mev, false);
+        const onUp = (uev) => {
+          window.removeEventListener('mousemove', onMove);
+          window.removeEventListener('mouseup', onUp);
+          pickHue(uev, true);
+        };
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+      });
+    }
+
+    if ($('vcCpHex')) {
+      const onHexInput = (commit) => {
+        let v = $('vcCpHex').value.trim();
+        if (v && !v.startsWith('#')) v = '#' + v;
+        if (/^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(v)) {
+          const rgb = cpHexToRgb(v);
+          const hsv = cpRgbToHsv(rgb.r, rgb.g, rgb.b);
+          if (hsv.s > 0.01) cpState.h = hsv.h;
+          cpState.s = hsv.s;
+          cpState.v = hsv.v;
+          renderCustomColorPopoverUI();
+          pushCustomPickerColorToTarget(commit);
+        }
+      };
+      $('vcCpHex').addEventListener('input', () => onHexInput(false));
+      $('vcCpHex').addEventListener('change', () => onHexInput(true));
+      $('vcCpHex').addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') {
+          ev.preventDefault();
+          onHexInput(true);
+        }
+      });
+    }
+
+    ['vcCpR', 'vcCpG', 'vcCpB'].forEach((rgbId) => {
+      const el = $(rgbId);
+      if (!el) return;
+      const onRgb = (commit) => {
+        const r = Math.max(0, Math.min(255, parseInt($('vcCpR').value || '0', 10) || 0));
+        const g = Math.max(0, Math.min(255, parseInt($('vcCpG').value || '0', 10) || 0));
+        const b = Math.max(0, Math.min(255, parseInt($('vcCpB').value || '0', 10) || 0));
+        const hsv = cpRgbToHsv(r, g, b);
+        if (hsv.s > 0.01) cpState.h = hsv.h;
+        cpState.s = hsv.s;
+        cpState.v = hsv.v;
+        renderCustomColorPopoverUI();
+        pushCustomPickerColorToTarget(commit);
+      };
+      el.addEventListener('input', () => onRgb(false));
+      el.addEventListener('change', () => onRgb(true));
+    });
+
+    document.querySelectorAll('#vcCpSwatches button[data-vcp-sw]').forEach((swBtn) => {
+      swBtn.addEventListener('click', () => {
+        const sw = swBtn.getAttribute('data-vcp-sw');
+        if (sw === 'none') {
+          if (cpState.allowUnfill) {
+            applyUnfillToActiveProxy();
+            cpState.dirtyPreview = false;
+            closeCustomColorPopover();
+          }
+          return;
+        }
+        const rgb = cpHexToRgb(sw);
+        const hsv = cpRgbToHsv(rgb.r, rgb.g, rgb.b);
+        if (hsv.s > 0.01) cpState.h = hsv.h;
+        cpState.s = hsv.s;
+        cpState.v = hsv.v;
+        renderCustomColorPopoverUI();
+        pushCustomPickerColorToTarget(true);
+      });
+    });
+  }
+
   function wirePaintControls() {
-    const focusProxy = (which, openPickerIfAlreadyActive = false) => {
+    const focusProxy = (which, openPickerIfAlreadyActive = false, anchorEl = null) => {
       const wasAlreadyActive = state.activeProxy === which;
       state.activeProxy = which;
       syncPaintProxiesUI();
       if (openPickerIfAlreadyActive && wasAlreadyActive) {
-        $('activePaintPicker')?.click();
+        openCustomColorPopover($('activePaintPicker'), anchorEl || $('activePaintPicker'));
       }
     };
-    $('proxyFillBtn').addEventListener('click', () => focusProxy('fill', true));
-    $('dockFillSwatch').addEventListener('click', () => focusProxy('fill', true));
-    $('proxyStrokeBtn').addEventListener('click', () => focusProxy('stroke', true));
-    $('dockStrokeSwatch').addEventListener('click', () => focusProxy('stroke', true));
-    $('proxyFillBtn').addEventListener('dblclick', () => { focusProxy('fill', false); $('activePaintPicker')?.click(); });
-    $('dockFillSwatch').addEventListener('dblclick', () => { focusProxy('fill', false); $('activePaintPicker')?.click(); });
-    $('proxyStrokeBtn').addEventListener('dblclick', () => { focusProxy('stroke', false); $('activePaintPicker')?.click(); });
-    $('dockStrokeSwatch').addEventListener('dblclick', () => { focusProxy('stroke', false); $('activePaintPicker')?.click(); });
+    $('proxyFillBtn').addEventListener('click', (ev) => { ev.stopPropagation(); focusProxy('fill', true, $('proxyFillBtn')); });
+    $('dockFillSwatch').addEventListener('click', (ev) => { ev.stopPropagation(); focusProxy('fill', true, $('dockFillSwatch')); });
+    $('proxyStrokeBtn').addEventListener('click', (ev) => { ev.stopPropagation(); focusProxy('stroke', true, $('proxyStrokeBtn')); });
+    $('dockStrokeSwatch').addEventListener('click', (ev) => { ev.stopPropagation(); focusProxy('stroke', true, $('dockStrokeSwatch')); });
+    $('proxyFillBtn').addEventListener('dblclick', (ev) => { ev.stopPropagation(); focusProxy('fill', false); openCustomColorPopover($('activePaintPicker'), $('proxyFillBtn')); });
+    $('dockFillSwatch').addEventListener('dblclick', (ev) => { ev.stopPropagation(); focusProxy('fill', false); openCustomColorPopover($('activePaintPicker'), $('dockFillSwatch')); });
+    $('proxyStrokeBtn').addEventListener('dblclick', (ev) => { ev.stopPropagation(); focusProxy('stroke', false); openCustomColorPopover($('activePaintPicker'), $('proxyStrokeBtn')); });
+    $('dockStrokeSwatch').addEventListener('dblclick', (ev) => { ev.stopPropagation(); focusProxy('stroke', false); openCustomColorPopover($('activePaintPicker'), $('dockStrokeSwatch')); });
     $('btnSwapFillStroke').addEventListener('click', swapFillAndStroke);
     $('btnDockSwap').addEventListener('click', swapFillAndStroke);
+    if ($('btnDockDefault')) $('btnDockDefault').addEventListener('click', applyDefaultFillAndStroke);
+    if ($('btnProxyDefault')) $('btnProxyDefault').addEventListener('click', applyDefaultFillAndStroke);
+
+    // Wire Illustrator left dock mini mode buttons ([Solid] [Gradient] [None / Unfill])
+    if ($('btnDockModeSolid')) {
+      $('btnDockModeSolid').addEventListener('click', () => applyPaintModeChoice('solid'));
+    }
+    if ($('btnDockModeGrad')) {
+      $('btnDockModeGrad').addEventListener('click', () => {
+        state.activeProxy = 'fill';
+        applyPaintModeChoice('linear');
+      });
+    }
+    if ($('btnDockModeNone')) {
+      $('btnDockModeNone').addEventListener('click', () => applyUnfillToActiveProxy());
+    }
 
     document.querySelectorAll('#paintModeTabs .pm-tab').forEach((btn) => {
       btn.addEventListener('click', () => {
-        const m = btn.getAttribute('data-pmode');
-        if (state.activeProxy === 'stroke' && (m === 'linear' || m === 'radial')) {
-          state.activeProxy = 'fill';
-        }
-        if (state.activeProxy === 'fill') {
-          state.paint.fillMode = m;
-          syncPaintProxiesUI();
-          if (m === 'none') {
-            postToBridge('patch_style', { props: { backgroundImage: 'none', backgroundColor: 'transparent' }, commitScrub: true });
-          } else if (m === 'solid') {
-            postToBridge('patch_style', { props: { backgroundImage: 'none', backgroundColor: state.paint.fillColor }, commitScrub: true });
-          } else {
-            renderGradientEditorUI();
-            applyActiveGradientToSelection(false, true);
-          }
-        } else {
-          state.paint.strokeMode = m === 'none' ? 'none' : 'solid';
-          syncPaintProxiesUI();
-          if (m === 'none') {
-            postToBridge('patch_style', { props: { border: 'none' }, commitScrub: true });
-          } else {
-            const bw = state.paint.strokeWidth || 1;
-            state.paint.strokeWidth = bw;
-            $('propBorderWidth').value = `${bw}px`;
-            postToBridge('patch_style', {
-              props: { borderWidth: `${bw}px`, borderStyle: state.paint.strokeStyle, borderColor: state.paint.strokeColor },
-              commitScrub: true
-            });
-          }
-        }
+        applyPaintModeChoice(btn.getAttribute('data-pmode'));
       });
     });
 
@@ -994,7 +1567,7 @@
         state.paint.fillColor = hex;
         syncPaintProxiesUI();
         postToBridge('patch_style', {
-          props: { backgroundImage: 'none', backgroundColor: hex },
+          props: { background: null, backgroundImage: 'none', backgroundColor: hex },
           previewOnly: !commit,
           commitScrub: commit
         });
@@ -1008,6 +1581,7 @@
         syncPaintProxiesUI();
         postToBridge('patch_style', {
           props: {
+            border: null,
             borderColor: hex,
             borderWidth: `${state.paint.strokeWidth}px`,
             borderStyle: state.paint.strokeStyle || 'solid'
@@ -1192,7 +1766,7 @@
     }
 
     if ($('codeSyncBadge')) {
-      $('codeSyncBadge').textContent = 'Synced HTML · CSS · JS';
+      $('codeSyncBadge').textContent = 'Synced · HTML/CSS/JS';
     }
 
     if (markBaseline) {
@@ -1332,10 +1906,143 @@
       layList.appendChild(row);
     }
 
+    if (!layList.hidden) {
+      const selLayerRow = layList.querySelector('.layer-item.selected');
+      if (selLayerRow && typeof selLayerRow.scrollIntoView === 'function') {
+        try { selLayerRow.scrollIntoView({ block: 'nearest' }); } catch (_) {}
+      }
+    }
+    if (!$('sectionList').hidden) {
+      const selSecRow = secList.querySelector('.layer-item.selected');
+      if (selSecRow && typeof selSecRow.scrollIntoView === 'function') {
+        try { selSecRow.scrollIntoView({ block: 'nearest' }); } catch (_) {}
+      }
+    }
+
     // DOM Tab (Airship live hierarchy)
     const domEl = $('domTreeList');
     if (domEl && !$('paneDom').hidden) {
       renderDomTab();
+    }
+
+    // Links Tab (All page & button links in separate scrollable cards)
+    if ($('paneLinks') && !$('paneLinks').hidden) {
+      renderLinksTab();
+    }
+    if ($('linksCountBadge')) {
+      $('linksCountBadge').textContent = String((state.links || []).length);
+    }
+  }
+
+  function syncIsolationBarUI() {
+    const bar = $('isolationBar');
+    if (!bar) return;
+    const active = Boolean(state.isolation && state.isolation.active && Array.isArray(state.isolation.stack) && state.isolation.stack.length);
+    bar.hidden = !active;
+    if (active && $('isolationBreadcrumb')) {
+      const trail = state.isolation.stack.map((s) => s.name || 'Group').join(' ▸ ');
+      $('isolationBreadcrumb').textContent = `Artboard ▸ ${trail}`;
+    }
+  }
+
+  function renderLinksTab() {
+    const listEl = $('linksList');
+    if (!listEl) return;
+
+    // Populate datalist with project HTML pages for quick autocomplete
+    const dl = $('vcProjectPagesDatalist');
+    if (dl) {
+      dl.innerHTML = '';
+      for (const pageFile of state.htmlFiles || []) {
+        const opt = document.createElement('option');
+        opt.value = pageFile;
+        dl.appendChild(opt);
+      }
+    }
+
+    const links = Array.isArray(state.links) ? state.links : [];
+    if ($('linksCountBadge')) {
+      $('linksCountBadge').textContent = String(links.length);
+    }
+
+    // Sync top "Link Selected" binder box with active selection
+    const selProps = state.selection?.props;
+    const selTargetLbl = $('linkSelectedTargetLabel');
+    const selUrlInp = $('inpSelectedLinkUrl');
+    if (selTargetLbl) {
+      if (selProps) {
+        selTargetLbl.textContent = `${selProps.tag}${selProps.id ? '#' + selProps.id : ''} · ${state.selection.summary || 'Selected'}`;
+      } else {
+        selTargetLbl.textContent = 'Select a button, text, object, or group on the artboard';
+      }
+    }
+    if (selUrlInp && document.activeElement !== selUrlInp) {
+      selUrlInp.value = selProps?.linkInfo?.url || '';
+    }
+
+    listEl.innerHTML = '';
+    if (!links.length) {
+      listEl.innerHTML = '<div class="empty-note">No links detected yet. Select any button, text, box, or group on the artboard and assign a page or URL above.</div>';
+      return;
+    }
+
+    for (const item of links) {
+      const card = document.createElement('div');
+      card.className = 'link-card' + (item.selected ? ' is-selected' : '');
+      card.setAttribute('data-link-vcid', item.vcId);
+      card.innerHTML = `
+        <div class="lc-head" title="Click to select & highlight this element/group on the artboard">
+          <span class="lc-title-wrap">
+            <span class="lc-tag-pill">${escapeHtml(item.tag)}</span>
+            <span class="lc-label">${escapeHtml(item.label)}</span>
+          </span>
+          ${item.groupName ? `<span class="lc-group-badge" title="Group / Section: ${escapeHtml(item.groupName)}">${escapeHtml(item.groupName)}</span>` : ''}
+        </div>
+        <div class="lc-sub" title="Click to select on artboard">${escapeHtml(item.selector || item.tag)}</div>
+        <div class="lc-edit-row">
+          <input type="text" class="prop-input lc-url-input" list="vcProjectPagesDatalist" value="${escapeHtml(item.url || '')}" placeholder="about.html, #section, https://…">
+          <button type="button" class="mini-btn accent lc-save-btn" title="Update link URL">Apply</button>
+        </div>
+      `;
+
+      const focusOnCanvas = () => {
+        postToBridge('focus_link_target', { vcId: item.vcId, selectGroup: true });
+      };
+      card.querySelector('.lc-head').addEventListener('click', focusOnCanvas);
+      card.querySelector('.lc-sub').addEventListener('click', focusOnCanvas);
+
+      const urlInp = card.querySelector('.lc-url-input');
+      const applyBtn = card.querySelector('.lc-save-btn');
+      const commitCardLink = () => {
+        const nextUrl = urlInp.value.trim();
+        state.everEditedInSession = true;
+        postToBridge('set_element_link', { vcId: item.vcId, url: nextUrl });
+        scheduleAutoCodeSync();
+        showToast(nextUrl ? `Updated link → ${nextUrl}` : 'Removed link');
+      };
+      applyBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        commitCardLink();
+      });
+      urlInp.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') {
+          ev.preventDefault();
+          commitCardLink();
+          urlInp.blur();
+        }
+      });
+      urlInp.addEventListener('change', () => {
+        if (urlInp.value.trim() !== String(item.url || '').trim()) {
+          commitCardLink();
+        }
+      });
+
+      listEl.appendChild(card);
+    }
+
+    const selCard = listEl.querySelector('.link-card.is-selected');
+    if (selCard && typeof selCard.scrollIntoView === 'function' && !listEl.contains(document.activeElement)) {
+      try { selCard.scrollIntoView({ block: 'nearest' }); } catch (_) {}
     }
   }
 
@@ -1396,7 +2103,7 @@
     state.paint.strokeWidth = p.strokeWidth || 0;
     state.paint.strokeStyle = p.strokeStyle || 'solid';
     if (p.strokeColor) state.paint.strokeColor = p.strokeColor;
-    state.paint.strokeMode = p.strokeWidth > 0 ? 'solid' : 'none';
+    state.paint.strokeMode = p.strokeMode || (p.strokeWidth > 0 ? 'solid' : 'none');
 
     setIfIdle('propBorderWidth', `${p.strokeWidth}px`);
     $('ddStrokeStyleLabel').textContent = p.strokeStyle || 'solid';
@@ -1655,6 +2362,10 @@
     { label: 'Flow Div Spacer Tool (D)', run: () => setActiveTool('div') },
     { label: 'Type Tool — Direct In-Group Text Edit (T)', run: () => setActiveTool('text') },
     { label: 'Eyedropper — Pick Fill, Gradient & Stroke (I)', run: () => setActiveTool('eyedropper') },
+    { label: 'Unfill / No Paint on Active Fill or Stroke (/)', run: () => applyUnfillToActiveProxy() },
+    { label: 'Exit Group Isolation Mode (Esc)', run: () => postToBridge('exit_isolation', { exitAll: false }) },
+    { label: 'Open Links Inspector Tab (All Buttons & URLs)', run: () => switchInspectorTab('links') },
+    { label: 'Compute Engine: Auto (GPU-First -> CPU Fallback)', run: () => setAccelerationPreference('auto') },
     { label: 'Convert Selected Shape/Box to Flow Div', run: () => postToBridge('convert_to_div') },
     { label: 'Group Selection (Ctrl+G)', run: () => postToBridge('group') },
     { label: 'Ungroup Selection (Ctrl+Alt+G)', run: () => postToBridge('ungroup') },
@@ -1748,10 +2459,12 @@
     });
     if ($('paneEdit')) $('paneEdit').hidden = target !== 'edit';
     if ($('paneCode')) $('paneCode').hidden = target !== 'code';
+    if ($('paneLinks')) $('paneLinks').hidden = target !== 'links';
     if ($('paneCss')) $('paneCss').hidden = target !== 'css';
     if ($('paneDom')) $('paneDom').hidden = target !== 'dom';
     if (target === 'dom') renderDomTab();
     if (target === 'code') renderCodeEditorUI(true);
+    if (target === 'links') renderLinksTab();
   }
 
   function switchLeftTreeTab(treeName) {
@@ -1762,6 +2475,12 @@
       if ($(listId)) $(listId).hidden = k !== treeName;
     });
     if (treeName === 'files') renderFileTreeUI();
+    if (treeName === 'layers') {
+      const selLayerRow = $('layerList')?.querySelector('.layer-item.selected');
+      if (selLayerRow && typeof selLayerRow.scrollIntoView === 'function') {
+        try { selLayerRow.scrollIntoView({ block: 'nearest' }); } catch (_) {}
+      }
+    }
   }
 
   async function ensureFileContentLoaded(relPath) {
@@ -1825,6 +2544,10 @@
     const content = state.projectFiles[targetFile] ?? '';
     if (forceUpdate || document.activeElement !== area) {
       area.value = content;
+      if (forceUpdate) {
+        area.scrollTop = 0;
+        area.scrollLeft = 0;
+      }
     }
     if (meta) {
       const lines = content ? content.split(/\r?\n/).length : 0;
@@ -1892,7 +2615,9 @@
             filesMap: state.projectFiles,
             assetUrls: state.assetBlobUrls,
             studioBaseUrl: STUDIO_BASE_URL,
-            includeBridge: true
+            includeBridge: true,
+            bypassEnabled: state.bypassGates,
+            accelMode: state.effectiveAccel
           })
         : (state.projectFiles[state.entry] || '<!doctype html><html><body></body></html>');
 
@@ -1937,7 +2662,10 @@
 
   async function ingestBrowserFolderFiles(rawFileEntries, fallbackFolderName = 'Folder Project', dirHandle = null) {
     const codeSync = window.VectoraCodeSync;
-    const skipSegs = new Set(['.git', 'node_modules', 'dist', 'dist-web', '_site', '.wrangler', 'memory']);
+    const skipSegs = new Set([
+      '.git', 'node_modules', 'dist', 'dist-web', '_site', '.wrangler', 'memory', '.vp-memory',
+      'desktop', 'release', 'win-unpacked', 'mac', 'linux-unpacked', 'out', 'build', '.next', '.cache'
+    ]);
     const textFiles = {};
     const binFiles = {};
     revokeAssetBlobUrls();
@@ -1968,8 +2696,15 @@
     for (const { fileObj, segs } of normalizedItems) {
       const rel = (stripFirst ? segs.slice(1) : segs).join('/');
       if (!rel) continue;
+      // Double-check relative path segments after stripping root folder name
+      if (rel.split('/').some((s) => skipSegs.has(s))) continue;
       if (/\.(?:html?|css|m?js)$/i.test(rel)) {
         if (fileObj.size <= 3 * 1024 * 1024) {
+          textFiles[rel] = await fileObj.text();
+        }
+      } else if (/\.json$/i.test(rel)) {
+        // Keep lightweight JSON configs (e.g. version.json, manifest.json) in VFS for relative fetch()
+        if (fileObj.size <= 512 * 1024) {
           textFiles[rel] = await fileObj.text();
         }
       } else if (/\.(?:png|jpe?g|webp|gif|svg|ico|woff2?|ttf|glb|gltf|mp4)$/i.test(rel)) {
@@ -2021,7 +2756,10 @@
     try {
       const dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
       const collected = [];
-      const skip = new Set(['.git', 'node_modules', 'dist', 'dist-web', '_site', '.wrangler', 'memory']);
+      const skip = new Set([
+        '.git', 'node_modules', 'dist', 'dist-web', '_site', '.wrangler', 'memory', '.vp-memory',
+        'desktop', 'release', 'win-unpacked', 'mac', 'linux-unpacked', 'out', 'build', '.next', '.cache'
+      ]);
       async function walkHandle(handle, prefix = '', depth = 0) {
         if (depth > 4) return;
         for await (const [name, entry] of handle.entries()) {
@@ -2073,7 +2811,9 @@
           filesMap: state.projectFiles,
           assetUrls: state.assetBlobUrls,
           studioBaseUrl: STUDIO_BASE_URL,
-          includeBridge: false
+          includeBridge: false,
+          bypassEnabled: false,
+          accelMode: state.effectiveAccel
         })
       : (state.projectFiles[state.entry] || '<!doctype html><html><body></body></html>');
     const blob = new Blob([compiledFullPage], { type: 'text/html;charset=utf-8' });
@@ -2272,20 +3012,41 @@
       }
 
       case 'open-recent': {
-        openFileDialog('Open Recent Session', (body) => {
+        openFileDialog('Open Recent Project', (body) => {
           const localRecents = loadLocalRecentSessions();
+          const workspaceItems = (state.recentWorkspaces || []).map((w) => {
+            const folderPath = w.originalSourceDir || w.target || '';
+            const folderBase = folderPath ? folderPath.replace(/\\/g, '/').replace(/\/+$/, '').split('/').pop() : 'Project';
+            return {
+              projectName: folderBase || 'Project',
+              entry: w.entry || 'index.html',
+              target: folderPath,
+              openedAt: w.openedAt || ''
+            };
+          });
           const merged = [];
-          const seen = new Set();
-          for (const s of [...localRecents, ...(state.recentSessions || [])]) {
-            if (!s || !s.entry) continue;
-            const key = `${s.projectName || ''}::${s.entry}::${s.target || ''}`;
-            if (seen.has(key)) continue;
-            seen.add(key);
-            merged.push(s);
+          const seenFolders = new Set();
+          // Strictly 1 entry per project folder — never list multiple files from the same folder!
+          for (const s of [...localRecents, ...workspaceItems, ...(state.recentSessions || [])]) {
+            if (!s) continue;
+            const folderPath = s.originalSourceDir || s.target || '';
+            const folderBase = folderPath
+              ? folderPath.replace(/\\/g, '/').replace(/\/+$/, '').split('/').pop()
+              : (s.projectName || 'Project');
+            const projTitle = s.projectName || folderBase || 'Project';
+            const folderKey = getProjectFolderKey(folderPath, projTitle);
+            if (seenFolders.has(folderKey)) continue;
+            seenFolders.add(folderKey);
+            merged.push({
+              ...s,
+              projectName: projTitle,
+              target: folderPath,
+              entry: s.entry || 'index.html'
+            });
           }
 
           if (!merged.length) {
-            body.innerHTML = `<div class="empty-note">No recent sessions recorded yet.</div>`;
+            body.innerHTML = `<div class="empty-note">No recent projects recorded yet.</div>`;
             return;
           }
 
@@ -2296,8 +3057,8 @@
             btn.type = 'button';
             btn.className = 'recent-item';
             btn.innerHTML = `
-              <b>${escapeHtml(item.entry)} — ${escapeHtml(item.projectName || 'Project')}</b>
-              <span>${escapeHtml(item.target || 'Browser Project Workspace')}</span>
+              <b>${escapeHtml(item.projectName || 'Project')}</b>
+              <span>${escapeHtml(item.target || 'Browser Folder Workspace')}</span>
             `;
             btn.addEventListener('click', async () => {
               closeFileDialog();
@@ -2310,18 +3071,19 @@
                 rebuildFileListsFromMap(state.projectFiles);
                 $('projectName').textContent = state.projectName;
                 persistStandaloneVfsToStorage();
-                loadEntryIntoIframe(item.entry);
+                loadEntryIntoIframe(item.entry || 'index.html');
               } else if (state.hasServerBackend && item.target && item.target !== state.targetPath) {
+                state.vfsMode = false;
                 await fetch('/__vc_api/switch-target', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ target: item.target, entry: item.entry })
+                  body: JSON.stringify({ target: item.target, entry: item.entry || 'index.html' })
                 });
                 await bootStudio();
               } else {
-                loadEntryIntoIframe(item.entry);
+                loadEntryIntoIframe(item.entry || 'index.html');
               }
-              showToast(`Opened ${item.entry}`);
+              showToast(`Opened project "${item.projectName}"`);
             });
             wrap.appendChild(btn);
           }
@@ -2566,11 +3328,21 @@
 
     $('btnBypassGates').addEventListener('click', () => {
       state.bypassGates = !state.bypassGates;
-      $('btnBypassGates').classList.toggle('active', state.bypassGates);
-      $('iconBypassUnlocked').hidden = !state.bypassGates;
-      $('iconBypassLocked').hidden = state.bypassGates;
+      syncBypassButtonUI(true);
       postToBridge('set_bypass', { enabled: state.bypassGates });
+      showToast(state.bypassGates ? 'Bypass Unlocked — Auth/Pro gates bypassed' : 'Bypass Locked — Auth/Pro gates enforced');
     });
+
+    if ($('btnExitIsolation')) {
+      $('btnExitIsolation').addEventListener('click', () => {
+        postToBridge('exit_isolation', { exitAll: false });
+      });
+    }
+    if ($('accelModeBadge')) {
+      $('accelModeBadge').addEventListener('click', () => {
+        $('prefsModal').hidden = false;
+      });
+    }
 
     $('btnUndo').addEventListener('click', () => postToBridge('undo'));
     $('btnRedo').addEventListener('click', () => postToBridge('redo'));
@@ -2632,6 +3404,9 @@
     });
     $('prefBtnScaleInPlace').addEventListener('click', () => setMultiScaleMode('in-place'));
     $('prefBtnScaleNormal').addEventListener('click', () => setMultiScaleMode('normal'));
+    if ($('prefBtnAccelAuto')) $('prefBtnAccelAuto').addEventListener('click', () => setAccelerationPreference('auto'));
+    if ($('prefBtnAccelGpu')) $('prefBtnAccelGpu').addEventListener('click', () => setAccelerationPreference('gpu'));
+    if ($('prefBtnAccelCpu')) $('prefBtnAccelCpu').addEventListener('click', () => setAccelerationPreference('cpu'));
 
     $('btnOpenShortcuts').addEventListener('click', () => { $('shortcutsModal').hidden = false; });
     $('btnCloseShortcuts').addEventListener('click', () => { $('shortcutsModal').hidden = true; });
@@ -2726,6 +3501,31 @@
           applyEditedProjectCode();
         }
       });
+    }
+
+    // Links Tab Controls
+    const submitSelectedLink = () => {
+      const inp = $('inpSelectedLinkUrl');
+      if (!inp) return;
+      const nextUrl = inp.value.trim();
+      postToBridge('set_element_link', { vcId: '', url: nextUrl });
+      state.everEditedInSession = true;
+      scheduleAutoCodeSync();
+      showToast(nextUrl ? `Link set to ${nextUrl}` : 'Removed link from selected element');
+    };
+    if ($('btnSetSelectedLink')) {
+      $('btnSetSelectedLink').addEventListener('click', submitSelectedLink);
+    }
+    if ($('inpSelectedLinkUrl')) {
+      $('inpSelectedLinkUrl').addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') {
+          ev.preventDefault();
+          submitSelectedLink();
+        }
+      });
+    }
+    if ($('btnRefreshLinks')) {
+      $('btnRefreshLinks').addEventListener('click', () => postToBridge('refresh_tree'));
     }
 
     // Illustrator Align Panel
@@ -2985,6 +3785,9 @@
       } else if (ev.shiftKey && k === 'x') {
         ev.preventDefault();
         swapFillAndStroke();
+      } else if (!ctrl && !ev.altKey && ev.key === '/') {
+        ev.preventDefault();
+        applyUnfillToActiveProxy();
       } else if (ev.shiftKey && ev.code === 'Digit1') {
         ev.preventDefault();
         fitArtboardToStage();
@@ -3000,11 +3803,16 @@
       } else if (ev.key === 'Escape') {
         closeAllDropdowns();
         hideContextMenu();
+        closeCustomColorPopover();
         $('cmdPaletteModal').hidden = true;
         $('prefsModal').hidden = true;
         $('shortcutsModal').hidden = true;
         closeFileDialog();
-        postToBridge('clear_selection');
+        if (state.isolation && state.isolation.active) {
+          postToBridge('exit_isolation', { exitAll: false });
+        } else {
+          postToBridge('clear_selection');
+        }
       } else if (!ctrl && !ev.altKey) {
         const toolKeys = { v: 'select', a: 'direct', e: 'transform', s: 'section', r: 'shape', d: 'div', t: 'text', i: 'eyedropper', m: 'marquee', n: 'note', h: 'hand', z: 'zoom' };
         if (toolKeys[k]) {
@@ -3054,6 +3862,32 @@
     });
   }
 
+  let bypassAnimTimer = null;
+  function syncBypassButtonUI(animate = false) {
+    const btn = $('btnBypassGates');
+    if (!btn) return;
+    const unlocked = Boolean(state.bypassGates);
+    btn.classList.toggle('active', unlocked);
+    btn.classList.toggle('is-unlocked', unlocked);
+    btn.classList.toggle('is-locked', !unlocked);
+    btn.setAttribute('aria-pressed', unlocked ? 'true' : 'false');
+    btn.title = unlocked
+      ? 'Unlocked = Bypass Auth/Pro gates active · Click to Lock (disable bypass)'
+      : 'Locked = Bypass OFF (Auth/Pro gates enforced) · Click to Unlock (enable bypass)';
+    if ($('bypassBtnLabel')) {
+      $('bypassBtnLabel').textContent = unlocked ? 'Bypass Auth' : 'Gates Locked';
+    }
+    if (animate) {
+      btn.classList.remove('anim-unlock', 'anim-lock');
+      void btn.offsetWidth;
+      btn.classList.add(unlocked ? 'anim-unlock' : 'anim-lock');
+      clearTimeout(bypassAnimTimer);
+      bypassAnimTimer = setTimeout(() => {
+        btn.classList.remove('anim-unlock', 'anim-lock');
+      }, 380);
+    }
+  }
+
   function syncTopbarPaletteUI(pal) {
     if (!pal) return;
     if (pal.primary && /^#[0-9a-f]{6}$/i.test(pal.primary)) {
@@ -3076,6 +3910,21 @@
 
     switch (msg.type) {
       case 'vc_bridge_ready': {
+        if (state.hasServerBackend && !state.vfsMode) {
+          try {
+            const locPath = previewFrame?.contentWindow?.location?.pathname || '';
+            if (locPath.startsWith('/__vc_target/')) {
+              const navRel = decodeURIComponent(locPath.slice('/__vc_target/'.length)).replace(/^\/+/, '');
+              if (navRel && navRel !== state.entry) {
+                state.entry = navRel;
+                $('ddPageLabel').textContent = state.entry;
+                state.activeCodeFile = state.entry;
+                renderFileTreeUI();
+                ensureFileContentLoaded(state.entry).then(() => renderCodeEditorUI(true));
+              }
+            }
+          } catch (_) {}
+        }
         if (msg.artboardRect) state.artboardMetrics = msg.artboardRect;
         if (msg.palette) syncTopbarPaletteUI(msg.palette);
         if (!state.hasManualViewport) fitArtboardToStage();
@@ -3086,8 +3935,19 @@
           artboardWidth: state.artboardWidth,
           artboardHeight: state.artboardHeight,
           prefs: state.preferences,
+          bypassEnabled: state.bypassGates,
+          accelMode: state.effectiveAccel,
           notes: getNotesForCurrentEntry()
         });
+        postToBridge('set_bypass', { enabled: state.bypassGates });
+        postToBridge('set_accel_mode', { accelMode: state.effectiveAccel });
+        if (state.pendingHashTarget) {
+          const hashSel = state.pendingHashTarget;
+          state.pendingHashTarget = '';
+          setTimeout(() => {
+            postToBridge('activate_view', { action: { kind: 'reveal', selector: hashSel } });
+          }, 80);
+        }
         syncPaintProxiesUI();
         break;
       }
@@ -3099,12 +3959,15 @@
         state.sessions = msg.sessions || [];
         state.layers = msg.layers || [];
         state.domTree = msg.domTree || [];
+        state.links = msg.links || [];
+        state.isolation = msg.isolation || { active: false, stack: [] };
         state.selection = msg.selection || { count: 0, selectedIds: [], props: null };
         state.discoveredViews = msg.views || [];
         if (msg.artboardRect) {
           state.artboardMetrics = msg.artboardRect;
           updateCanvasTransform();
         }
+        syncIsolationBarUI();
         renderSessionsAndLayers();
         populateInspectorFromSelection();
         break;
@@ -3174,6 +4037,14 @@
         triggerDirectHtmlSave();
         break;
       }
+      case 'vc_shortcut_unfill': {
+        applyUnfillToActiveProxy();
+        break;
+      }
+      case 'vc_shortcut_swap_paint': {
+        swapFillAndStroke();
+        break;
+      }
       case 'vc_save_payload_ready': {
         const fn = pendingSaveResolvers.get(msg.requestId);
         if (fn) {
@@ -3203,11 +4074,48 @@
       }
       case 'vc_vfs_navigate': {
         const codeSync = window.VectoraCodeSync;
-        const resolved = codeSync
-          ? codeSync.resolveRelativeAssetPath(state.entry, msg.href)
-          : String(msg.href || '').replace(/^\.\//, '');
-        if (resolved && state.projectFiles[resolved] !== undefined) {
-          loadEntryIntoIframe(resolved);
+        const rawHref = String(msg.href || '').trim();
+        const hashIdx = rawHref.indexOf('#');
+        const rawPath = (hashIdx >= 0 ? rawHref.slice(0, hashIdx) : rawHref).split('?')[0].trim();
+        const rawHash = msg.hash || (hashIdx >= 0 ? rawHref.slice(hashIdx) : '');
+
+        if (!rawPath && rawHash) {
+          postToBridge('activate_view', { action: { kind: 'reveal', selector: rawHash } });
+          break;
+        }
+
+        const cleanDirect = codeSync ? codeSync.normalizeRelPath(rawPath) : rawPath.replace(/^\.?\//, '');
+        const resolvedRel = codeSync
+          ? codeSync.resolveRelativeAssetPath(state.entry, rawPath)
+          : cleanDirect;
+
+        const candidates = [
+          cleanDirect,
+          resolvedRel,
+          cleanDirect && !/\.html?$/i.test(cleanDirect) ? `${cleanDirect}.html` : '',
+          resolvedRel && !/\.html?$/i.test(resolvedRel) ? `${resolvedRel}.html` : '',
+          cleanDirect ? `${cleanDirect.replace(/\/+$/, '')}/index.html` : ''
+        ].filter(Boolean);
+
+        let matchedPage = candidates.find((c) => state.projectFiles[c] !== undefined);
+        if (!matchedPage) {
+          const lowerCands = candidates.map((c) => c.toLowerCase());
+          matchedPage = state.htmlFiles.find((f) => lowerCands.includes(f.toLowerCase()));
+        }
+        if (!matchedPage && cleanDirect) {
+          const base = cleanDirect.split('/').pop().toLowerCase();
+          matchedPage = state.htmlFiles.find((f) => {
+            const fb = f.split('/').pop().toLowerCase();
+            return fb === base || fb === `${base}.html`;
+          });
+        }
+
+        if (matchedPage) {
+          state.pendingHashTarget = rawHash || '';
+          loadEntryIntoIframe(matchedPage);
+          showToast(`Navigated to ${matchedPage}${rawHash || ''}`);
+        } else if (rawHash) {
+          postToBridge('activate_view', { action: { kind: 'reveal', selector: rawHash } });
         }
         break;
       }
@@ -3312,6 +4220,8 @@
     $('prefKeyInc').value = `${state.preferences.keyboardIncrement || 1}px`;
 
     syncScaleModeUI();
+    syncBypassButtonUI(false);
+    syncAccelerationEngineUI();
     renderNotesUI();
     renderGradientEditorUI();
     loadEntryIntoIframe(state.entry);
@@ -3367,6 +4277,8 @@
 
         connectSseEvents();
         syncScaleModeUI();
+        syncBypassButtonUI(false);
+        syncAccelerationEngineUI();
         renderNotesUI();
         renderGradientEditorUI();
         loadEntryIntoIframe(state.entry);
@@ -3380,10 +4292,14 @@
   }
 
   // Initialize everything
+  state.gpuInfo = detectHardwareAcceleration();
+  syncAccelerationEngineUI();
+  syncBypassButtonUI(false);
   syncHostCanvasCursor();
   wireUiControls();
   wireMinimapAndOuterCanvasPanZoom();
   wireAllScrubbyNumberFields();
   wirePaintControls();
+  wireCustomColorPopover();
   bootStudio();
 })();

@@ -116,29 +116,68 @@
     }
   };
 
-  let bypassEnabled = true;
+  // Protect target-page scripts from SecurityError on history.replaceState/pushState inside blob: iframes
   try {
-    if (sessionStorage.getItem('__vc_bypass_gates') === '0' || sessionStorage.getItem('__he_bypass_gates') === '0') {
+    if (location.protocol === 'blob:' && window.history) {
+      const origReplace = window.history.replaceState ? window.history.replaceState.bind(window.history) : null;
+      const origPush = window.history.pushState ? window.history.pushState.bind(window.history) : null;
+      if (origReplace) {
+        window.history.replaceState = function (stateObj, title, url) {
+          try {
+            return origReplace(stateObj, title, url);
+          } catch (_) {}
+        };
+      }
+      if (origPush) {
+        window.history.pushState = function (stateObj, title, url) {
+          try {
+            return origPush(stateObj, title, url);
+          } catch (_) {}
+        };
+      }
+    }
+  } catch (_) {}
+
+  let bypassEnabled = typeof window.__VC_BYPASS_INIT__ === 'boolean' ? window.__VC_BYPASS_INIT__ : true;
+  try {
+    if (typeof window.__VC_BYPASS_INIT__ === 'boolean') {
+      sessionStorage.setItem('__vc_bypass_gates', bypassEnabled ? '1' : '0');
+    } else if (sessionStorage.getItem('__vc_bypass_gates') === '0' || sessionStorage.getItem('__he_bypass_gates') === '0') {
       bypassEnabled = false;
     }
   } catch (_) {}
 
   const GATE_ATTRS = ['data-gated', 'data-locked', 'data-auth-locked', 'data-paywall', 'inert'];
+  const savedRootGateAttrs = new Map();
+  const savedBodyGateAttrs = new Map();
 
   function stripGateAttributes() {
     if (!bypassEnabled) return;
     const root = document.documentElement;
     if (root) {
       for (const attr of GATE_ATTRS) {
-        if (root.hasAttribute(attr)) root.removeAttribute(attr);
+        if (root.hasAttribute(attr)) {
+          if (!savedRootGateAttrs.has(attr)) savedRootGateAttrs.set(attr, root.getAttribute(attr) ?? '');
+          root.removeAttribute(attr);
+        }
       }
       root.setAttribute('data-vc-preview-unlocked', 'true');
     }
     if (document.body) {
       for (const attr of GATE_ATTRS) {
-        if (document.body.hasAttribute(attr)) document.body.removeAttribute(attr);
+        if (document.body.hasAttribute(attr)) {
+          if (!savedBodyGateAttrs.has(attr)) savedBodyGateAttrs.set(attr, document.body.getAttribute(attr) ?? '');
+          document.body.removeAttribute(attr);
+        }
       }
-      document.body.classList.add('adv', 'pro');
+      if (!document.body.classList.contains('adv')) {
+        document.body.classList.add('adv');
+        document.body.setAttribute('data-vc-added-adv', '1');
+      }
+      if (!document.body.classList.contains('pro')) {
+        document.body.classList.add('pro');
+        document.body.setAttribute('data-vc-added-pro', '1');
+      }
     }
   }
 
@@ -154,8 +193,62 @@
     } catch (_) {}
   }
 
-  seedPreviewEntitlements();
-  stripGateAttributes();
+  function clearPreviewEntitlementsAndLock() {
+    try {
+      if (localStorage.getItem('__vc_preview_pro') === 'true') {
+        localStorage.removeItem('vp-pro');
+        localStorage.removeItem('__vc_preview_pro');
+      }
+      if (localStorage.getItem('vp-token') === 'vc-studio-preview-owner-token') {
+        localStorage.removeItem('vp-token');
+      }
+    } catch (_) {}
+
+    const root = document.documentElement;
+    if (root) {
+      root.removeAttribute('data-vc-preview-unlocked');
+      for (const [attr, val] of savedRootGateAttrs.entries()) {
+        root.setAttribute(attr, val);
+      }
+    }
+    if (document.body) {
+      for (const [attr, val] of savedBodyGateAttrs.entries()) {
+        document.body.setAttribute(attr, val);
+      }
+      if (document.body.hasAttribute('data-vc-added-adv')) {
+        document.body.classList.remove('adv');
+        document.body.removeAttribute('data-vc-added-adv');
+      }
+      if (document.body.hasAttribute('data-vc-added-pro')) {
+        document.body.classList.remove('pro');
+        document.body.removeAttribute('data-vc-added-pro');
+      }
+    }
+
+    try {
+      if (window.AC && typeof window.AC.setPro === 'function') {
+        window.AC.setPro(false);
+      }
+      document.querySelectorAll('[data-vc-gate-hidden="1"]').forEach((el) => {
+        el.removeAttribute('data-vc-gate-hidden');
+        el.style.removeProperty('display');
+      });
+      document.querySelectorAll('[data-vc-blur-cleared="1"]').forEach((el) => {
+        el.removeAttribute('data-vc-blur-cleared');
+        el.style.removeProperty('filter');
+      });
+      window.dispatchEvent(new CustomEvent('vp-auth-changed'));
+    } catch (_) {}
+
+    return { unlocked: false, bypassEnabled: false };
+  }
+
+  if (bypassEnabled) {
+    seedPreviewEntitlements();
+    stripGateAttributes();
+  } else {
+    clearPreviewEntitlementsAndLock();
+  }
 
   try {
     const attrObs = new MutationObserver(() => {
@@ -186,54 +279,70 @@
     const nativeFetch = window.fetch.bind(window);
     window.fetch = async function (input, init) {
       const urlStr = typeof input === 'string' ? input : (input && input.url) || '';
-      if (bypassEnabled && urlStr && !urlStr.includes('/__vc_api/') && !urlStr.includes('/__he_api/')) {
+      if (urlStr && !urlStr.includes('/__vc_api/') && !urlStr.includes('/__he_api/')) {
         try {
-          const parsed = new URL(urlStr, location.origin);
+          const baseOrigin = location.origin && location.origin !== 'null' ? location.origin : 'https://local.vectora.preview';
+          const parsed = new URL(urlStr, baseOrigin);
           const p = parsed.pathname.toLowerCase();
 
-          if (
-            p === '/me' ||
-            p === '/api/me' ||
-            p === '/api/user' ||
-            p === '/api/auth/session' ||
-            p === '/api/auth/me' ||
-            p === '/api/subscription' ||
-            p === '/api/billing/status' ||
-            p === '/api/entitlements'
-          ) {
-            return new Response(JSON.stringify(MOCK_USER), {
-              status: 200,
+          if (bypassEnabled) {
+            if (
+              p === '/me' ||
+              p === '/api/me' ||
+              p === '/api/user' ||
+              p === '/api/auth/session' ||
+              p === '/api/auth/me' ||
+              p === '/api/subscription' ||
+              p === '/api/billing/status' ||
+              p === '/api/entitlements'
+            ) {
+              return new Response(JSON.stringify(MOCK_USER), {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' }
+              });
+            }
+
+            if (p === '/request' || p === '/api/request' || p === '/admin/approve' || p === '/api/admin/approve') {
+              return new Response(JSON.stringify({ ok: true, approved: true, user: MOCK_USER }), {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' }
+              });
+            }
+
+            if (p === '/api/sync-state') {
+              return new Response(
+                JSON.stringify({
+                  token: 'vc-studio-preview-owner-token',
+                  user: MOCK_USER,
+                  pro: '1',
+                  updatedAt: Date.now()
+                }),
+                { status: 200, headers: { 'Content-Type': 'application/json' } }
+              );
+            }
+
+            if (p === '/admin/list' || p === '/api/admin/users' || p === '/api/admin/requests') {
+              return new Response(
+                JSON.stringify({
+                  ok: true,
+                  owner: MOCK_USER.email,
+                  users: [
+                    { email: 'alex.creator@example.com', name: 'Alex Rivera', provider: 'google', requested: true, approved: false, requestedAt: new Date().toISOString() },
+                    { email: 'sara.studio@example.com', name: 'Sara Chen', provider: 'github', requested: true, approved: true, approvedAt: new Date().toISOString() }
+                  ],
+                  requests: [
+                    { email: 'alex.creator@example.com', name: 'Alex Rivera', status: 'pending' }
+                  ]
+                }),
+                { status: 200, headers: { 'Content-Type': 'application/json' } }
+              );
+            }
+          } else if (p === '/me' || p === '/api/me' || p === '/api/auth/session' || p === '/api/auth/me') {
+            // When Padlock is LOCKED (Bypass OFF), return unauthenticated 401 cleanly instead of CORS error inside blob:
+            return new Response(JSON.stringify({ authenticated: false, pro: false, approved: false }), {
+              status: 401,
               headers: { 'Content-Type': 'application/json' }
             });
-          }
-
-          if (p === '/api/sync-state') {
-            return new Response(
-              JSON.stringify({
-                token: 'vc-studio-preview-owner-token',
-                user: MOCK_USER,
-                pro: '1',
-                updatedAt: Date.now()
-              }),
-              { status: 200, headers: { 'Content-Type': 'application/json' } }
-            );
-          }
-
-          if (p === '/admin/list' || p === '/api/admin/users' || p === '/api/admin/requests') {
-            return new Response(
-              JSON.stringify({
-                ok: true,
-                owner: MOCK_USER.email,
-                users: [
-                  { email: 'alex.creator@example.com', name: 'Alex Rivera', provider: 'google', requested: true, approved: false, requestedAt: new Date().toISOString() },
-                  { email: 'sara.studio@example.com', name: 'Sara Chen', provider: 'github', requested: true, approved: true, approvedAt: new Date().toISOString() }
-                ],
-                requests: [
-                  { email: 'alex.creator@example.com', name: 'Alex Rivera', status: 'pending' }
-                ]
-              }),
-              { status: 200, headers: { 'Content-Type': 'application/json' } }
-            );
           }
         } catch (_) {}
       }
@@ -242,7 +351,7 @@
   }
 
   function unlockRuntimeGates() {
-    if (!bypassEnabled) return { unlocked: false };
+    if (!bypassEnabled) return { unlocked: false, bypassEnabled: false };
     stripGateAttributes();
     seedPreviewEntitlements();
 
@@ -261,6 +370,7 @@
       if (advModal && !advModal.hasAttribute('data-vc-force-open')) {
         advModal.hidden = true;
       }
+      window.dispatchEvent(new CustomEvent('vp-auth-changed'));
     } catch (_) {}
 
     try {
@@ -274,12 +384,14 @@
       ];
       document.querySelectorAll(gateSelectors.join(',')).forEach((el) => {
         if (!el.hasAttribute('data-vc-force-open')) {
+          el.setAttribute('data-vc-gate-hidden', '1');
           el.style.setProperty('display', 'none', 'important');
         }
       });
       document.querySelectorAll('main, .workspace, #app, .vgrid').forEach((el) => {
         const cs = getComputedStyle(el);
         if (cs.filter && cs.filter.includes('blur')) {
+          el.setAttribute('data-vc-blur-cleared', '1');
           el.style.setProperty('filter', 'none', 'important');
         }
         if (cs.pointerEvents === 'none') {
@@ -329,12 +441,12 @@
 
   function activateDiscoveredView(actionObj) {
     if (!actionObj) return false;
-    unlockRuntimeGates();
+    if (bypassEnabled) unlockRuntimeGates();
     if (typeof window.__vcStepFrames === 'function') window.__vcStepFrames(3);
     if (actionObj.type === 'click' && actionObj.selector) {
       const el = document.querySelector(actionObj.selector);
       if (el) {
-        el.removeAttribute('disabled');
+        if (bypassEnabled) el.removeAttribute('disabled');
         el.click();
         return true;
       }
@@ -354,9 +466,13 @@
   }
 
   window.addEventListener('DOMContentLoaded', () => {
-    unlockRuntimeGates();
-    setTimeout(unlockRuntimeGates, 400);
-    setTimeout(unlockRuntimeGates, 1200);
+    if (bypassEnabled) {
+      unlockRuntimeGates();
+      setTimeout(() => { if (bypassEnabled) unlockRuntimeGates(); }, 400);
+      setTimeout(() => { if (bypassEnabled) unlockRuntimeGates(); }, 1200);
+    } else {
+      clearPreviewEntitlementsAndLock();
+    }
   });
 
   const api = {
@@ -366,10 +482,15 @@
       try {
         sessionStorage.setItem('__vc_bypass_gates', bypassEnabled ? '1' : '0');
       } catch (_) {}
-      if (bypassEnabled) unlockRuntimeGates();
+      if (bypassEnabled) {
+        unlockRuntimeGates();
+      } else {
+        clearPreviewEntitlementsAndLock();
+      }
       return bypassEnabled;
     },
     unlockRuntimeGates,
+    lockRuntimeGates: clearPreviewEntitlementsAndLock,
     discoverSwitchableViews,
     activateDiscoveredView
   };

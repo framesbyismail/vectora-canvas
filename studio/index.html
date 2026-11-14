@@ -67,7 +67,7 @@
           <button type="button" class="dd-opt file-opt" data-file-act="open-recent" id="fileOpenRecent">
             <span class="file-opt-main">
               <svg viewBox="0 0 14 14" width="12" height="12"><circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M7 4.3V7l2 1.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
-              <span>Open Recent Session</span>
+              <span>Open Recent Project</span>
             </span>
           </button>
           <button type="button" class="dd-opt file-opt" data-file-act="open-project" id="fileOpenProject">
@@ -105,9 +105,12 @@
         </button>
       </div>
 
-      <button type="button" class="tb-btn bypass-pill active" id="btnBypassGates" title="Bypass Sign-In, OAuth &amp; Pro gates in local preview">
-        <svg id="iconBypassUnlocked" viewBox="0 0 16 16" width="13" height="13"><rect x="3" y="7.5" width="10" height="6.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M5.2 7.5V5a2.8 2.8 0 0 1 5.3-1.2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
-        <svg id="iconBypassLocked" viewBox="0 0 16 16" width="13" height="13" hidden><rect x="3" y="7.5" width="10" height="6.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M5.2 7.5V5a2.8 2.8 0 0 1 5.6 0v2.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+      <button type="button" class="tb-btn bypass-pill active is-unlocked" id="btnBypassGates" aria-pressed="true" title="Unlocked = Bypass Auth/Pro gates active · Click to Lock (disable bypass)">
+        <svg class="bypass-lock-svg" id="iconBypassPadlock" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <path class="padlock-shackle" d="M5.2 7.4V4.9a2.8 2.8 0 0 1 5.6 0v2.5" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round"/>
+          <rect class="padlock-body" x="3" y="7.4" width="10" height="6.8" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.45"/>
+          <circle class="padlock-keyhole" cx="8" cy="10.8" r="1.05" fill="currentColor"/>
+        </svg>
         <span id="bypassBtnLabel">Bypass Auth</span>
       </button>
 
@@ -313,13 +316,32 @@
 
       <div class="ai-tool-sep"></div>
 
-      <!-- Illustrator Mini Fill / Stroke Proxy Dock -->
-      <div class="dock-swatch-wrap" title="Active Fill &amp; Stroke (Click to focus, Shift+X to swap)">
-        <button type="button" class="dock-fill active-proxy" id="dockFillSwatch" aria-label="Active Fill"></button>
-        <button type="button" class="dock-stroke" id="dockStrokeSwatch" aria-label="Active Stroke"></button>
-        <button type="button" class="dock-swap" id="btnDockSwap" title="Swap Fill &amp; Stroke (Shift+X)">
-          <svg viewBox="0 0 12 12" width="10" height="10"><path d="M3 2.5h5.5v5.5M1.5 4L3 2.5L4.5 4M7 9.5l1.5-1.5L10 9.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </button>
+      <!-- Illustrator Fill / Stroke / Default / Swap + Color / Gradient / None (Unfill) Dock -->
+      <div class="dock-paint-cluster" id="dockSwatches">
+        <div class="dock-swatch-wrap" title="Active Fill &amp; Stroke (Click to focus, click again for Color Picker, Shift+X to swap)">
+          <button type="button" class="dock-fill active-proxy" id="dockFillSwatch" aria-label="Active Fill"></button>
+          <button type="button" class="dock-stroke" id="dockStrokeSwatch" aria-label="Active Stroke"></button>
+          <button type="button" class="dock-swap" id="btnDockSwap" title="Swap Fill &amp; Stroke (Shift+X)">
+            <svg viewBox="0 0 12 12" width="10" height="10"><path d="M3 2.5h5.5v5.5M1.5 4L3 2.5L4.5 4M7 9.5l1.5-1.5L10 9.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <button type="button" class="dock-default" id="btnDockDefault" title="Default Fill &amp; Stroke">
+            <svg viewBox="0 0 12 12" width="10" height="10">
+              <rect x="4" y="4" width="6.5" height="6.5" fill="none" stroke="#a8a29e" stroke-width="1.5"/>
+              <rect x="1.2" y="1.2" width="6.2" height="6.2" fill="#ece9e5" stroke="#161514" stroke-width="1"/>
+            </svg>
+          </button>
+        </div>
+        <div class="dock-mini-modes" role="group" aria-label="Fill Mode: Solid, Gradient, or None (Unfill)">
+          <button type="button" class="dock-mini-btn active" id="btnDockModeSolid" data-dock-pmode="solid" title="Fill with Solid Color">
+            <span class="dm-solid-chip" id="dockMiniSolidChip"></span>
+          </button>
+          <button type="button" class="dock-mini-btn" id="btnDockModeGrad" data-dock-pmode="linear" title="Fill with Gradient">
+            <span class="dm-grad-chip"></span>
+          </button>
+          <button type="button" class="dock-mini-btn" id="btnDockModeNone" data-dock-pmode="none" title="None / Unfill (Shortcut: /)">
+            <span class="dm-none-chip"></span>
+          </button>
+        </div>
       </div>
     </nav>
 
@@ -342,6 +364,8 @@
         </div>
 
         <div class="ct-right">
+          <span class="accel-pill" id="accelModeBadge" title="Hardware Acceleration Mode">GPU</span>
+
           <!-- Custom Dark Dropdown: Artboard Frame Size -->
           <div class="vc-dd" id="ddArtboard">
             <button type="button" class="vc-dd-btn compact" id="ddArtboardBtn" title="Artboard Frame Size">
@@ -371,6 +395,20 @@
             </button>
           </div>
         </div>
+      </div>
+
+      <!-- ILLUSTRATOR GROUP ISOLATION BAR -->
+      <div class="isolation-bar" id="isolationBar" hidden role="status" aria-live="polite">
+        <div class="iso-left">
+          <button type="button" class="iso-back-btn" id="btnExitIsolation" title="Exit Isolation Mode (Esc or Double-Click Outside)">
+            <svg viewBox="0 0 14 14" width="12" height="12"><path d="M8.8 2.8L4.5 7l4.3 4.2M5 7h6.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>Exit Isolation</span>
+          </button>
+          <span class="iso-sep"></span>
+          <svg class="iso-grp-ico" viewBox="0 0 14 14" width="12" height="12"><rect x="1.8" y="2" width="6.5" height="6.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="5.7" y="5.5" width="6.5" height="6.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>
+          <span class="iso-crumb" id="isolationBreadcrumb">Artboard ▸ Group</span>
+        </div>
+        <span class="iso-hint">Individual group items editable · Outside dimmed (Esc to exit)</span>
       </div>
 
       <div class="canvas-scroll" id="canvasScroll">
@@ -436,10 +474,11 @@
 
     <!-- COLUMN 4: RIGHT INSPECTOR (AIRSHIP TABS: EDIT | CSS | DOM + ILLUSTRATOR PANELS) -->
     <aside class="sidebar right-panel" id="rightPanel">
-      <!-- Airship-style Inspector Top Tabs -->
+      <!-- Airship-style Inspector Top Tabs (Edit | Code | Links | CSS | DOM) -->
       <div class="insp-tabs" role="tablist">
         <button type="button" class="insp-tab active" data-itab="edit" id="iTabEdit">Edit</button>
         <button type="button" class="insp-tab" data-itab="code" id="iTabCode">Code</button>
+        <button type="button" class="insp-tab" data-itab="links" id="iTabLinks">Links</button>
         <button type="button" class="insp-tab" data-itab="css" id="iTabCss">CSS</button>
         <button type="button" class="insp-tab" data-itab="dom" id="iTabDom">DOM</button>
       </div>
@@ -670,18 +709,26 @@
 
           <div class="ai-paint-header">
             <div class="ai-proxy-box">
-              <button type="button" class="proxy-fill active-proxy" id="proxyFillBtn" title="Click to edit Fill"></button>
-              <button type="button" class="proxy-stroke" id="proxyStrokeBtn" title="Click to edit Stroke"></button>
+              <button type="button" class="proxy-fill active-proxy" id="proxyFillBtn" title="Click to focus Fill · Click again for Color Picker"></button>
+              <button type="button" class="proxy-stroke" id="proxyStrokeBtn" title="Click to focus Stroke · Click again for Color Picker"></button>
               <button type="button" class="proxy-swap" id="btnSwapFillStroke" title="Swap Fill &amp; Stroke (Shift+X)">
                 <svg viewBox="0 0 12 12" width="11" height="11"><path d="M3 2.5h5.5v5.5M1.5 4L3 2.5L4.5 4M7 9.5l1.5-1.5L10 9.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+              </button>
+              <button type="button" class="proxy-default" id="btnProxyDefault" title="Reset Default Fill &amp; Stroke">
+                <svg viewBox="0 0 12 12" width="10" height="10">
+                  <rect x="4" y="4" width="6.5" height="6.5" fill="none" stroke="#a8a29e" stroke-width="1.5"/>
+                  <rect x="1.2" y="1.2" width="6.2" height="6.2" fill="#ece9e5" stroke="#161514" stroke-width="1"/>
+                </svg>
               </button>
             </div>
 
             <div class="paint-mode-tabs" id="paintModeTabs">
-              <button type="button" class="pm-tab active" data-pmode="solid" title="Solid Color">Solid</button>
+              <button type="button" class="pm-tab active" data-pmode="solid" title="Solid Color Fill / Stroke">Solid</button>
               <button type="button" class="pm-tab" data-pmode="linear" title="Linear Gradient">Linear</button>
               <button type="button" class="pm-tab" data-pmode="radial" title="Radial Gradient">Radial</button>
-              <button type="button" class="pm-tab" data-pmode="none" title="No Fill / No Stroke">None</button>
+              <button type="button" class="pm-tab pm-none-btn" data-pmode="none" id="btnPaintUnfill" title="Unfill / No Paint (Shortcut: /)">
+                <span class="pm-slash-ico" aria-hidden="true"></span>None
+              </button>
             </div>
           </div>
 
@@ -849,12 +896,12 @@
 
       <!-- TAB 2: PROJECT CODE (WHOLE-FOLDER HTML, CSS & JS LIVE SYNC) -->
       <div class="insp-pane" id="paneCode" hidden>
-        <section class="panel-sec grow-sec">
-          <div class="sec-head">
-            <span>Project Source</span>
-            <span class="sync-live-pill" id="codeSyncBadge">Auto-Sync Active</span>
+        <section class="panel-sec grow-sec code-pane-sec">
+          <div class="sec-head single-line-head">
+            <span>Source</span>
+            <span class="sync-live-pill" id="codeSyncBadge">Synced · HTML/CSS/JS</span>
           </div>
-          <div class="prop-row" style="margin-bottom: 6px;">
+          <div class="prop-row code-dd-row">
             <div class="vc-dd full-dd" id="ddCodeFile">
               <button type="button" class="vc-dd-btn field-dd" id="ddCodeFileBtn" title="Select HTML, CSS, or JavaScript file in folder">
                 <span id="ddCodeFileLabel">index.html</span>
@@ -863,10 +910,35 @@
               <div class="vc-dd-menu" id="ddCodeFileMenu" hidden></div>
             </div>
           </div>
-          <textarea id="projectCodeEditor" class="prop-textarea code-area project-code-area" rows="18" spellcheck="false" placeholder="Select an HTML, CSS, or JS file…"></textarea>
-          <div class="prop-row" style="margin-top: 6px; justify-content: space-between;">
+          <textarea id="projectCodeEditor" class="prop-textarea code-area project-code-area" rows="16" spellcheck="false" placeholder="Select an HTML, CSS, or JS file…"></textarea>
+          <div class="prop-row code-foot-row">
             <span class="code-file-hint" id="codeFileMeta">HTML · CSS · JS Synced</span>
             <button type="button" class="mini-btn accent" id="btnApplyProjectCode" title="Apply edited HTML, CSS, or JS code to canvas (Ctrl+Enter)">Apply Code</button>
+          </div>
+        </section>
+      </div>
+
+      <!-- TAB 3: LINKS (ALL PAGE & BUTTON URL LINKS — CLICK TO SELECT ON ARTBOARD + LIVE EDIT) -->
+      <div class="insp-pane" id="paneLinks" hidden>
+        <section class="panel-sec links-bind-sec">
+          <div class="sec-head single-line-head">
+            <span>Link Selected</span>
+            <span class="badge-cnt" id="linksCountBadge">0</span>
+          </div>
+          <div class="link-sel-target" id="linkSelectedTargetLabel">Select a button, text, object, or group on the artboard</div>
+          <div class="prop-row mt-6">
+            <input type="text" id="inpSelectedLinkUrl" class="prop-input" list="vcProjectPagesDatalist" placeholder="e.g. about.html, #section, https://…">
+            <button type="button" class="mini-btn accent" id="btnSetSelectedLink" title="Attach or update link on selected button/object/group">Set Link</button>
+          </div>
+          <datalist id="vcProjectPagesDatalist"></datalist>
+        </section>
+        <section class="panel-sec grow-sec links-list-sec">
+          <div class="sec-head single-line-head">
+            <span>All Artboard Links</span>
+            <button type="button" class="mini-btn" id="btnRefreshLinks" title="Rescan links on current artboard">Refresh</button>
+          </div>
+          <div class="links-card-list" id="linksList">
+            <div class="empty-note">No links detected on this artboard yet.</div>
           </div>
         </section>
       </div>
@@ -949,6 +1021,15 @@
             <input type="text" id="prefKeyInc" class="prop-input num-in" value="1px">
           </div>
         </div>
+        <div class="pref-field-row">
+          <span>Compute Acceleration Engine</span>
+          <div class="inline-actions">
+            <button type="button" class="mini-btn active" id="prefBtnAccelAuto" data-accel-pref="auto">Auto (GPU→CPU)</button>
+            <button type="button" class="mini-btn" id="prefBtnAccelGpu" data-accel-pref="gpu">GPU</button>
+            <button type="button" class="mini-btn" id="prefBtnAccelCpu" data-accel-pref="cpu">CPU</button>
+          </div>
+        </div>
+        <div class="code-file-hint" id="prefAccelStatusText">Detecting hardware GPU / CPU compositor…</div>
       </div>
     </div>
   </div>
@@ -1000,6 +1081,63 @@
         </button>
       </div>
       <div class="vm-body" id="fileDialogBody"></div>
+    </div>
+  </div>
+
+  <!-- CUSTOM GREY STONE + ORANGE COLOR PICKER POPOVER (REPLACES OS NATIVE COLOR POPUP) -->
+  <div class="vc-color-popover" id="vcColorPopover" hidden role="dialog" aria-label="Color Picker">
+    <div class="vcp-head">
+      <span class="vcp-title" id="vcCpTitle">Fill Color</span>
+      <div class="inline-actions">
+        <button type="button" class="mini-icon-btn" id="vcCpEyedropper" title="Sample color with Eyedropper">
+          <svg viewBox="0 0 16 16" width="12" height="12"><path d="M10.8 2.6a1.7 1.7 0 0 1 2.4 2.4l-1.5 1.5-2.4-2.4 1.5-1.5ZM8.3 5.1l2.4 2.4-5.2 5.2H3.1v-2.4l5.2-5.2Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+        </button>
+        <button type="button" class="mini-btn" id="vcCpUnfill" title="Set to None / Unfill (/)">
+          <span class="pm-slash-ico" aria-hidden="true"></span>None
+        </button>
+        <button type="button" class="mini-icon-btn" id="vcCpClose" aria-label="Close Color Picker">
+          <svg viewBox="0 0 12 12" width="10" height="10"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="vcp-sv-wrap" id="vcCpSvWrap">
+      <canvas id="vcCpSvCanvas" width="216" height="128"></canvas>
+      <div class="vcp-sv-thumb" id="vcCpSvThumb"></div>
+    </div>
+    <div class="vcp-hue-row">
+      <div class="vcp-preview-chip" id="vcCpPreviewChip"></div>
+      <div class="vcp-hue-track" id="vcCpHueTrack">
+        <div class="vcp-hue-thumb" id="vcCpHueThumb"></div>
+      </div>
+    </div>
+    <div class="vcp-inputs">
+      <label class="vcp-hex-box">
+        <span>HEX</span>
+        <input type="text" id="vcCpHex" class="prop-input" value="#f97316" spellcheck="false">
+      </label>
+      <label class="vcp-rgb-box">
+        <span>R</span>
+        <input type="number" id="vcCpR" class="prop-input" min="0" max="255" value="249">
+      </label>
+      <label class="vcp-rgb-box">
+        <span>G</span>
+        <input type="number" id="vcCpG" class="prop-input" min="0" max="255" value="115">
+      </label>
+      <label class="vcp-rgb-box">
+        <span>B</span>
+        <input type="number" id="vcCpB" class="prop-input" min="0" max="255" value="22">
+      </label>
+    </div>
+    <div class="vcp-swatches" id="vcCpSwatches">
+      <button type="button" data-vcp-sw="#f97316" style="background:#f97316" title="#f97316"></button>
+      <button type="button" data-vcp-sw="#ea580c" style="background:#ea580c" title="#ea580c"></button>
+      <button type="button" data-vcp-sw="#f59e0b" style="background:#f59e0b" title="#f59e0b"></button>
+      <button type="button" data-vcp-sw="#22c55e" style="background:#22c55e" title="#22c55e"></button>
+      <button type="button" data-vcp-sw="#ece9e5" style="background:#ece9e5" title="#ece9e5"></button>
+      <button type="button" data-vcp-sw="#a8a29e" style="background:#a8a29e" title="#a8a29e"></button>
+      <button type="button" data-vcp-sw="#44403c" style="background:#44403c" title="#44403c"></button>
+      <button type="button" data-vcp-sw="#191817" style="background:#191817" title="#191817"></button>
+      <button type="button" class="vcp-sw-none" data-vcp-sw="none" title="None / Unfill"></button>
     </div>
   </div>
 

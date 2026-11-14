@@ -73,6 +73,16 @@
   // memberId (vcId or groupId) -> parentGroupId
   const parentGroupOf = new Map();
 
+  // Illustrator Group Isolation Mode stack: [{ id, kind: 'group'|'container', name }]
+  const isolationStack = [];
+  // Link / attribute patches: vcId -> { id, selector, attrs: { ... } }
+  const attrPatchesByEl = new Map();
+  const initialAttrsByEl = new WeakMap();
+  // Hardware acceleration mode ('gpu' | 'cpu')
+  let accelMode = typeof window.__VC_ACCEL_INIT__ === 'string' ? window.__VC_ACCEL_INIT__ : 'gpu';
+  let flashHighlightRect = null;
+  let flashHighlightTimer = null;
+
   // Named Sessions cache
   let namedSessions = []; // { sessionId, name, vcId, tabTriggerSelector, kind, tag, locked }
   let showAllSessionsOverlay = false;
@@ -216,6 +226,14 @@
         outline: 2px solid #f97316 !important;
         outline-offset: 2px !important;
         cursor: text !important;
+      }
+      html[data-vc-preview-unlocked="true"] [data-pro-only]:not(.modal):not([role="dialog"]):not([hidden]),
+      html[data-vc-preview-unlocked="true"] [data-pro-locked]:not(.modal):not([role="dialog"]):not([hidden]),
+      html[data-vc-preview-unlocked="true"] [data-requires-auth]:not(.modal):not([role="dialog"]):not([hidden]),
+      html[data-vc-preview-unlocked="true"] [data-auth-required]:not(.modal):not([role="dialog"]):not([hidden]),
+      html[data-vc-preview-unlocked="true"] .pro-only:not(.modal):not([role="dialog"]):not([hidden]),
+      html[data-vc-preview-unlocked="true"] .pro-locked:not(.modal):not([role="dialog"]):not([hidden]) {
+        display: block !important;
       }
       #__vc_overlay_root__ {
         position: fixed;
@@ -381,6 +399,28 @@
         border-radius: 3px;
         pointer-events: none;
       }
+      html.__vc_edit_mode__ [data-vc-iso-dim="1"] {
+        opacity: 0.2 !important;
+        filter: saturate(0.45) !important;
+        pointer-events: none !important;
+      }
+      .__vc_iso_frame__ {
+        position: fixed;
+        border: 1.5px dashed rgba(249, 115, 22, 0.85);
+        box-shadow: 0 0 0 1px rgba(20, 19, 18, 0.65);
+        pointer-events: none;
+        border-radius: 3px;
+      }
+      .__vc_link_flash__ {
+        position: fixed;
+        border: 2.5px solid #fb923c;
+        background: rgba(249, 115, 22, 0.16);
+        border-radius: 4px;
+        pointer-events: none;
+      }
+      html[data-vc-accel="gpu"] #__vc_overlay_root__ {
+        will-change: contents;
+      }
     `;
     (document.head || document.documentElement).appendChild(st);
   }
@@ -464,6 +504,7 @@
     if (!root) return;
     root.style.setProperty('--vc-artboard-w', `${artboardWidth}px`);
     root.style.setProperty('--vc-artboard-h', `${artboardHeight}px`);
+    root.setAttribute('data-vc-accel', accelMode || 'gpu');
     root.classList.add('__vc_pasteboard__');
     if (mode === 'edit') {
       root.classList.add('__vc_edit_mode__');
@@ -555,18 +596,157 @@
     return parts.join(' > ');
   }
 
-  function getTopmostGroupOf(memberId) {
-    let cur = memberId;
-    let topGroup = null;
-    const guard = new Set();
-    while (parentGroupOf.has(cur) && !guard.has(cur)) {
-      guard.add(cur);
-      const pg = parentGroupOf.get(cur);
-      if (!groupsById.has(pg)) break;
-      topGroup = pg;
-      cur = pg;
+  function getActiveIsolation() {
+    while (isolationStack.length > 0) {
+      const top = isolationStack[isolationStack.length - 1];
+      if (top.kind === 'group' && groupsById.has(top.id)) return top;
+      if (top.kind === 'container' && getEl(top.id)) return top;
+      isolationStack.pop();
     }
-    return topGroup;
+    return null;
+  }
+
+  function getIsolatedRootElements(iso = getActiveIsolation()) {
+    if (!iso) return [];
+    if (iso.kind === 'container') {
+      const el = getEl(iso.id);
+      return el ? [el] : [];
+    }
+    const leaves = expandGroupLeafIds(iso.id, []).map(getEl).filter(Boolean);
+    return leaves.filter((el) => !leaves.some((other) => other !== el && other.contains(el)));
+  }
+
+  function getIsolatedBounds() {
+    const roots = getIsolatedRootElements();
+    if (!roots.length) return null;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const el of roots) {
+      const r = el.getBoundingClientRect();
+      minX = Math.min(minX, r.left);
+      minY = Math.min(minY, r.top);
+      maxX = Math.max(maxX, r.right);
+      maxY = Math.max(maxY, r.bottom);
+    }
+    if (!isFinite(minX)) return null;
+    return { left: minX, top: minY, right: maxX, bottom: maxY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) };
+  }
+
+  function isElementInsideActiveIsolation(el) {
+    const iso = getActiveIsolation();
+    if (!iso) return true;
+    if (!el || isBridgeNode(el)) return false;
+    const roots = getIsolatedRootElements(iso);
+    return roots.some((rootEl) => rootEl === el || rootEl.contains(el));
+  }
+
+  function syncIsolationDimming() {
+    document.querySelectorAll('[data-vc-iso-dim="1"]').forEach((n) => n.removeAttribute('data-vc-iso-dim'));
+    const iso = getActiveIsolation();
+    if (!iso || mode !== 'edit' || !document.body) return;
+    const roots = getIsolatedRootElements(iso);
+    if (!roots.length) return;
+
+    const dimDisjointSubtrees = (parent) => {
+      for (const ch of Array.from(parent.children || [])) {
+        if (isBridgeNode(ch)) continue;
+        if (roots.includes(ch)) continue;
+        if (roots.some((rEl) => ch.contains(rEl))) {
+          dimDisjointSubtrees(ch);
+        } else {
+          ch.setAttribute('data-vc-iso-dim', '1');
+        }
+      }
+    };
+    dimDisjointSubtrees(document.body);
+  }
+
+  function enterIsolationMode(entryObj, initialSelectEl = null) {
+    if (!entryObj || !entryObj.id) return false;
+    const cur = getActiveIsolation();
+    if (cur && cur.id === entryObj.id) return false;
+    isolationStack.push({
+      id: entryObj.id,
+      kind: entryObj.kind || 'group',
+      name: entryObj.name || entryObj.id
+    });
+    activeGroupSelectionId = null;
+    if (initialSelectEl && isElementInsideActiveIsolation(initialSelectEl)) {
+      const vid = ensureVcId(initialSelectEl);
+      selectedIds = vid ? [vid] : [];
+    } else {
+      selectedIds = [];
+    }
+    syncIsolationDimming();
+    renderOverlays();
+    sendTreeAndSelectionUpdate();
+    return true;
+  }
+
+  function exitIsolationMode(exitAll = false) {
+    if (!isolationStack.length) return false;
+    let exited = null;
+    if (exitAll) {
+      exited = isolationStack[0];
+      isolationStack.length = 0;
+    } else {
+      exited = isolationStack.pop();
+    }
+    syncIsolationDimming();
+    if (exited) {
+      if (exited.kind === 'group' && groupsById.has(exited.id)) {
+        activeGroupSelectionId = exited.id;
+        selectedIds = expandGroupLeafIds(exited.id, []);
+      } else if (exited.kind === 'container' && getEl(exited.id)) {
+        activeGroupSelectionId = null;
+        selectedIds = [exited.id];
+      }
+    }
+    renderOverlays();
+    sendTreeAndSelectionUpdate();
+    return true;
+  }
+
+  function getTopmostGroupOf(memberId, ignoreIsolation = false) {
+    const activeIso = !ignoreIsolation ? getActiveIsolation() : null;
+    const stopGroup = activeIso && activeIso.kind === 'group' ? activeIso.id : null;
+
+    const resolveChainFrom = (startId) => {
+      let cur = startId;
+      let topGroup = null;
+      const guard = new Set();
+      while (parentGroupOf.has(cur) && !guard.has(cur)) {
+        guard.add(cur);
+        const pg = parentGroupOf.get(cur);
+        if (!groupsById.has(pg)) break;
+        if (stopGroup && pg === stopGroup) break;
+        topGroup = pg;
+        cur = pg;
+      }
+      return topGroup;
+    };
+
+    const directGrp = resolveChainFrom(memberId);
+    if (directGrp) return directGrp;
+
+    // Also walk DOM ancestors in case a parent <div>/card was grouped and user clicked an inner tag!
+    const el = getEl(memberId);
+    if (el) {
+      const isoRoots = activeIso ? getIsolatedRootElements(activeIso) : [];
+      let p = el.parentElement;
+      while (p && p !== document.body && p !== document.documentElement) {
+        if (isoRoots.includes(p) && activeIso.kind === 'container') break;
+        const pid = idByEl.get(p);
+        if (pid) {
+          if (stopGroup && groupsById.get(stopGroup)?.memberIds.includes(pid)) {
+            return null;
+          }
+          const ancGrp = resolveChainFrom(pid);
+          if (ancGrp) return ancGrp;
+        }
+        p = p.parentElement;
+      }
+    }
+    return null;
   }
 
   function expandGroupLeafIds(groupId, out = []) {
@@ -630,17 +810,38 @@
       if (!el || !propMap || !propMap.size) continue;
       const w = propMap.get('width');
       const h = propMap.get('height');
-      if (!w && !h) continue;
+      const tr = propMap.get('transform');
+      const disp = propMap.get('display');
+      const unfillFill = el.getAttribute('data-vc-unfill-fill') === '1' || propMap.get('background') === 'none';
+      const unfillStroke = el.getAttribute('data-vc-unfill-stroke') === '1' || propMap.get('border-style') === 'none';
+      if (!w && !h && !tr && !disp && !unfillFill && !unfillStroke) continue;
       const sel = computeCleanSelector(el);
       if (!sel) continue;
-      const decls = ['box-sizing: border-box !important', 'flex-shrink: 0 !important'];
+      const decls = [];
+      if (w || h) {
+        decls.push('box-sizing: border-box !important', 'flex-shrink: 0 !important');
+      }
       if (w) {
         decls.push(`width: ${w} !important`, 'max-width: none !important');
       }
       if (h) {
         decls.push(`height: ${h} !important`, `min-height: ${h} !important`, `max-height: ${h} !important`);
       }
-      rules.push(`${sel} { ${decls.join('; ')}; }`);
+      if (disp) {
+        decls.push(`display: ${disp} !important`);
+      }
+      if (tr) {
+        decls.push(`transform: ${tr} !important`);
+      }
+      if (unfillFill) {
+        decls.push('background: none !important', 'background-color: transparent !important', 'background-image: none !important');
+      }
+      if (unfillStroke) {
+        decls.push('border: none !important', 'border-width: 0px !important');
+      }
+      if (decls.length) {
+        rules.push(`${sel} { ${decls.join('; ')}; }`);
+      }
     }
     if (!rules.length) {
       if (tag) tag.textContent = '';
@@ -660,7 +861,18 @@
     if (!id) return;
     if (!patchedPropsByEl.has(id)) patchedPropsByEl.set(id, new Map());
     patchedPropsByEl.get(id).set(prop, val === '' || val === undefined ? null : val);
-    if (prop === 'width' || prop === 'height') {
+    if (
+      prop === 'width' ||
+      prop === 'height' ||
+      prop === 'transform' ||
+      prop === 'display' ||
+      prop === 'background' ||
+      prop === 'background-color' ||
+      prop === 'background-image' ||
+      prop === 'border' ||
+      prop === 'border-width' ||
+      prop === 'border-style'
+    ) {
       syncAuthoritativeStyleRules();
     }
   }
@@ -672,6 +884,11 @@
       vcId: id,
       el,
       cssText: el.getAttribute('style') || '',
+      unfillFill: el.getAttribute('data-vc-unfill-fill') || '',
+      unfillStroke: el.getAttribute('data-vc-unfill-stroke') || '',
+      tx: el.getAttribute('data-vc-tx') || '',
+      ty: el.getAttribute('data-vc-ty') || '',
+      rot: el.getAttribute('data-vc-rot') || '',
       patchedProps: propMap ? new Map(propMap) : new Map()
     };
   }
@@ -680,6 +897,16 @@
     if (!snap || !snap.el) return;
     if (snap.cssText) snap.el.setAttribute('style', snap.cssText);
     else snap.el.removeAttribute('style');
+    if (snap.unfillFill) snap.el.setAttribute('data-vc-unfill-fill', snap.unfillFill);
+    else snap.el.removeAttribute('data-vc-unfill-fill');
+    if (snap.unfillStroke) snap.el.setAttribute('data-vc-unfill-stroke', snap.unfillStroke);
+    else snap.el.removeAttribute('data-vc-unfill-stroke');
+    if (snap.tx) snap.el.setAttribute('data-vc-tx', snap.tx);
+    else snap.el.removeAttribute('data-vc-tx');
+    if (snap.ty) snap.el.setAttribute('data-vc-ty', snap.ty);
+    else snap.el.removeAttribute('data-vc-ty');
+    if (snap.rot) snap.el.setAttribute('data-vc-rot', snap.rot);
+    else snap.el.removeAttribute('data-vc-rot');
     if (snap.patchedProps && snap.patchedProps.size) {
       patchedPropsByEl.set(snap.vcId, new Map(snap.patchedProps));
     } else {
@@ -723,6 +950,40 @@
     switch (entry.kind) {
       case 'style': {
         applyElementSnapshot(isUndo ? entry.before : entry.after);
+        break;
+      }
+      case 'attr': {
+        const el = entry.el;
+        if (!el) break;
+        const mapToApply = isUndo ? entry.beforeAttrs : entry.afterAttrs;
+        const id = ensureVcId(el);
+        for (const [attrName, attrVal] of Object.entries(mapToApply || {})) {
+          if (attrVal === null || attrVal === undefined || attrVal === '') {
+            el.removeAttribute(attrName);
+          } else {
+            el.setAttribute(attrName, String(attrVal));
+          }
+        }
+        const origMap = initialAttrsByEl.get(el) || {};
+        const diffAttrs = {};
+        let hasDiff = false;
+        for (const k of Object.keys(mapToApply || {})) {
+          const curVal = el.hasAttribute(k) ? el.getAttribute(k) : null;
+          const origVal = origMap[k] !== undefined ? origMap[k] : null;
+          if (curVal !== origVal) {
+            diffAttrs[k] = curVal;
+            hasDiff = true;
+          }
+        }
+        if (hasDiff) {
+          attrPatchesByEl.set(id, {
+            id: el.id && !el.id.startsWith('vc_') ? el.id : '',
+            selector: computeCleanSelector(el),
+            attrs: diffAttrs
+          });
+        } else {
+          attrPatchesByEl.delete(id);
+        }
         break;
       }
       case 'text': {
@@ -1094,6 +1355,9 @@
     }
 
     const textPatches = Array.from(textPatchesByEl.values()).filter((tp) => tp.before !== tp.after);
+    const attrPatches = Array.from(attrPatchesByEl.values()).filter(
+      (ap) => ap && ap.attrs && Object.keys(ap.attrs).length > 0
+    );
 
     const insertedNodes = [];
     for (const el of createdElements) {
@@ -1142,6 +1406,7 @@
     return {
       stylePatches,
       textPatches,
+      attrPatches,
       insertedNodes,
       deletedTargets,
       googleFonts: Array.from(loadedGoogleFonts),
@@ -1278,6 +1543,36 @@
     return sessions;
   }
 
+  function buildLayerEntryForEl(el) {
+    const vcId = ensureVcId(el);
+    if (!vcId) return null;
+    const tag = el.tagName.toLowerCase();
+    const createdKind = el.getAttribute('data-vc-created');
+    const rawTxt = (
+      el.getAttribute('data-name') ||
+      (el.id && !el.id.startsWith('vc_') ? `#${el.id}` : '') ||
+      el.getAttribute('aria-label') ||
+      el.textContent ||
+      ''
+    ).replace(/\s+/g, ' ').trim().slice(0, 28);
+    const name = createdKind === 'div'
+      ? (el.id && !el.id.startsWith('vc_') ? el.id : 'Flow Div Spacer')
+      : createdKind === 'shape'
+        ? (el.getAttribute('data-vc-shape') || 'Shape')
+        : (rawTxt || tag);
+    const pGrp = getTopmostGroupOf(vcId, true) || parentGroupOf.get(vcId) || null;
+    return {
+      id: vcId,
+      isGroup: false,
+      name,
+      tag: createdKind === 'div' ? 'flow-div' : createdKind === 'shape' ? 'shape' : tag,
+      parentGroupId: pGrp,
+      depth: pGrp ? 1 : 0,
+      locked: isEntityLocked(vcId),
+      selected: selectedIds.includes(vcId)
+    };
+  }
+
   function collectLayersList() {
     const layers = [];
     // 1. Top-level & nested composite groups first
@@ -1300,44 +1595,262 @@
       });
     }
 
-    // 2. Created shapes & flow divs + interactive / layout elements
+    // 2. Created shapes & flow divs + all selectable interactive / text / layout elements
     const candidates = document.querySelectorAll(
-      '[data-vc-created], .card, header, nav, section, button, input, textarea, h1, h2, h3, p, img, canvas, div[id], .vc-flow-div, .vc-shape'
+      '[data-vc-created], .card, header, nav, section, article, aside, footer, button, a, input, select, textarea, label, h1, h2, h3, h4, h5, h6, p, span, strong, img, svg, canvas, div, .vc-flow-div, .vc-shape'
     );
     const added = new Set();
     candidates.forEach((el) => {
-      if (layers.length >= 160) return;
+      if (layers.length >= 280) return;
       if (isBridgeNode(el)) return;
       const vcId = ensureVcId(el);
       if (!vcId || added.has(vcId)) return;
+      const isSel = selectedIds.includes(vcId);
+      if (!isSel && isStructuralGridWrapper(el)) return;
+      if (!isSel && el.tagName === 'SPAN' && autoGroupButtons && el.closest('button, a')) return;
       const r = el.getBoundingClientRect();
       const locked = lockedIds.has(vcId);
-      if (!locked && (r.width < 6 || r.height < 6)) return;
+      if (!locked && !isSel && (r.width < 6 || r.height < 6)) return;
       added.add(vcId);
-
-      const tag = el.tagName.toLowerCase();
-      const createdKind = el.getAttribute('data-vc-created');
-      const rawTxt = (el.getAttribute('data-name') || el.id || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 26);
-      const name = createdKind === 'div'
-        ? (el.id || 'Flow Div Spacer')
-        : createdKind === 'shape'
-          ? (el.getAttribute('data-vc-shape') || 'Shape')
-          : (rawTxt || tag);
-
-      const pGrp = parentGroupOf.get(vcId) || null;
-      layers.push({
-        id: vcId,
-        isGroup: false,
-        name,
-        tag: createdKind === 'div' ? 'flow-div' : createdKind === 'shape' ? 'shape' : tag,
-        parentGroupId: pGrp,
-        depth: pGrp ? 1 : 0,
-        locked: isEntityLocked(vcId),
-        selected: selectedIds.includes(vcId)
-      });
+      const entry = buildLayerEntryForEl(el);
+      if (entry) layers.push(entry);
     });
 
+    // 3. Guarantee EVERY currently selected element appears in Layers and is marked selected: true!
+    for (const selId of selectedIds) {
+      if (added.has(selId)) continue;
+      const el = getEl(selId);
+      if (!el || isBridgeNode(el)) continue;
+      added.add(selId);
+      const entry = buildLayerEntryForEl(el);
+      if (entry) layers.push(entry);
+    }
+
     return layers;
+  }
+
+  function extractElementLinkInfo(el) {
+    if (!el || el.nodeType !== 1 || isBridgeNode(el)) return null;
+    const tag = el.tagName.toLowerCase();
+    const vcLink = el.getAttribute('data-vc-link');
+    if (vcLink !== null && vcLink !== '') {
+      return { attrName: 'data-vc-link', url: vcLink };
+    }
+    if ((tag === 'a' || tag === 'area') && el.hasAttribute('href')) {
+      return { attrName: 'href', url: el.getAttribute('href') || '' };
+    }
+    for (const attr of ['data-href', 'data-url', 'data-page', 'formaction']) {
+      if (el.hasAttribute(attr)) {
+        return { attrName: attr, url: el.getAttribute(attr) || '' };
+      }
+    }
+    if (tag === 'form' && el.hasAttribute('action')) {
+      return { attrName: 'action', url: el.getAttribute('action') || '' };
+    }
+    if (el.hasAttribute('onclick')) {
+      const oc = el.getAttribute('onclick') || '';
+      const m = /(?:location(?:\.href)?\s*=\s*|location\.(?:assign|replace)\s*\(\s*|window\.open\s*\(\s*)(['"])([^'"]*)\1/i.exec(oc);
+      if (m) {
+        return { attrName: 'onclick', url: m[2] };
+      }
+    }
+    return null;
+  }
+
+  function collectPageLinks() {
+    if (!document.body) return [];
+    const out = [];
+    const seen = new Set();
+    const nodes = document.body.querySelectorAll(
+      'a, area, [data-vc-link], [data-href], [data-url], [data-page], button[formaction], form[action], [onclick]'
+    );
+    nodes.forEach((el) => {
+      if (isBridgeNode(el) || out.length >= 200) return;
+      const info = extractElementLinkInfo(el);
+      const tag = el.tagName.toLowerCase();
+      if (!info && tag !== 'a') return;
+      const vcId = ensureVcId(el);
+      if (!vcId || seen.has(vcId)) return;
+      seen.add(vcId);
+
+      const url = info ? info.url : (el.getAttribute('href') || '');
+      const labelTxt = (
+        el.textContent ||
+        el.getAttribute('aria-label') ||
+        el.getAttribute('title') ||
+        el.id ||
+        tag
+      ).replace(/\s+/g, ' ').trim().slice(0, 38) || tag;
+
+      const topGrp = getTopmostGroupOf(vcId, true);
+      let groupName = '';
+      if (topGrp && groupsById.has(topGrp)) {
+        groupName = groupsById.get(topGrp).name;
+      } else {
+        const sec = el.closest('[data-name], nav, header, section, .card');
+        if (sec && sec !== el && !isBridgeNode(sec)) {
+          groupName = (
+            sec.getAttribute('data-name') ||
+            sec.querySelector(':scope > .tag, :scope > .shead .tag, :scope > h2, :scope > h3')?.textContent ||
+            (sec.id && !sec.id.startsWith('vc_') ? `#${sec.id}` : sec.tagName.toLowerCase())
+          ).replace(/\s+/g, ' ').trim().slice(0, 22);
+        }
+      }
+
+      out.push({
+        vcId,
+        idAttr: el.id && !el.id.startsWith('vc_') ? el.id : '',
+        selector: computeCleanSelector(el),
+        tag,
+        label: labelTxt,
+        url,
+        attrName: info ? info.attrName : 'href',
+        groupId: topGrp || '',
+        groupName,
+        selected: selectedIds.includes(vcId) || (Boolean(topGrp) && activeGroupSelectionId === topGrp)
+      });
+    });
+    return out;
+  }
+
+  function snapshotInitialAttrsIfNeeded(el, attrNames) {
+    if (!initialAttrsByEl.has(el)) {
+      initialAttrsByEl.set(el, {});
+    }
+    const map = initialAttrsByEl.get(el);
+    for (const k of attrNames) {
+      if (!(k in map)) {
+        map[k] = el.hasAttribute(k) ? el.getAttribute(k) : null;
+      }
+    }
+  }
+
+  function setElementLinkWithUndo(targetVcId, rawUrl) {
+    let el = targetVcId ? getEl(targetVcId) : null;
+    if (!el && selectedIds.length > 0) {
+      // Prefer a button or <a> inside selection if a group is selected, else first selected element
+      const selEls = selectedIds.map(getEl).filter(Boolean);
+      el = selEls.find((e) => ['A', 'BUTTON'].includes(e.tagName)) || selEls[0] || null;
+    }
+    if (!el || isBridgeNode(el)) return false;
+
+    const vcId = ensureVcId(el);
+    const cleanUrl = String(rawUrl ?? '').trim();
+    const tag = el.tagName.toLowerCase();
+
+    const touchedAttrs = ['href', 'data-vc-link', 'data-href', 'data-url', 'action', 'onclick'];
+    snapshotInitialAttrsIfNeeded(el, touchedAttrs);
+    const beforeAttrs = {};
+    for (const k of touchedAttrs) {
+      beforeAttrs[k] = el.hasAttribute(k) ? el.getAttribute(k) : null;
+    }
+
+    if (tag === 'a' || tag === 'area') {
+      if (cleanUrl) el.setAttribute('href', cleanUrl);
+      else el.removeAttribute('href');
+    } else if (tag === 'form') {
+      if (cleanUrl) el.setAttribute('action', cleanUrl);
+      else el.removeAttribute('action');
+    } else {
+      if (cleanUrl) {
+        el.setAttribute('data-vc-link', cleanUrl);
+        if (el.hasAttribute('data-href')) el.setAttribute('data-href', cleanUrl);
+        const curOc = el.getAttribute('onclick') || '';
+        const isNavOc = !curOc || /^\s*(?:window\.)?location(?:\.href)?\s*=/i.test(curOc);
+        if (isNavOc) {
+          const safeJsUrl = cleanUrl.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+          el.setAttribute('onclick', `location.href='${safeJsUrl}'`);
+        }
+      } else {
+        el.removeAttribute('data-vc-link');
+        el.removeAttribute('data-href');
+        const curOc = el.getAttribute('onclick') || '';
+        if (/^\s*(?:window\.)?location(?:\.href)?\s*=/i.test(curOc)) {
+          el.removeAttribute('onclick');
+        }
+      }
+    }
+
+    const afterAttrs = {};
+    let anyChanged = false;
+    for (const k of touchedAttrs) {
+      afterAttrs[k] = el.hasAttribute(k) ? el.getAttribute(k) : null;
+      if (afterAttrs[k] !== beforeAttrs[k]) anyChanged = true;
+    }
+    if (!anyChanged) return false;
+
+    const origMap = initialAttrsByEl.get(el) || {};
+    const diffAttrs = {};
+    let hasDiff = false;
+    for (const k of touchedAttrs) {
+      const curV = afterAttrs[k];
+      const origV = origMap[k] !== undefined ? origMap[k] : null;
+      if (curV !== origV) {
+        diffAttrs[k] = curV;
+        hasDiff = true;
+      }
+    }
+    if (hasDiff) {
+      attrPatchesByEl.set(vcId, {
+        id: el.id && !el.id.startsWith('vc_') ? el.id : '',
+        selector: computeCleanSelector(el),
+        attrs: diffAttrs
+      });
+    } else {
+      attrPatchesByEl.delete(vcId);
+    }
+
+    pushHistoryStep({
+      label: cleanUrl ? `Set Link (${cleanUrl})` : 'Clear Link',
+      entries: [{ kind: 'attr', el, beforeAttrs, afterAttrs }]
+    });
+    renderOverlays();
+    sendTreeAndSelectionUpdate();
+    return true;
+  }
+
+  function focusLinkTargetOnArtboard(vcId, selectGroup = false) {
+    const el = getEl(vcId);
+    if (!el || isBridgeNode(el)) return false;
+
+    // Reveal ancestor if inside a hidden section/modal
+    let cur = el;
+    while (cur && cur !== document.body) {
+      if (cur.hidden) cur.hidden = false;
+      if (cur.classList && cur.classList.contains('is-hidden')) cur.classList.remove('is-hidden');
+      cur = cur.parentElement;
+    }
+
+    const topGrp = getTopmostGroupOf(vcId, false);
+    if (selectGroup && topGrp && groupsById.has(topGrp)) {
+      activeGroupSelectionId = topGrp;
+      selectedIds = expandGroupLeafIds(topGrp, []);
+    } else {
+      activeGroupSelectionId = null;
+      selectedIds = [vcId];
+    }
+
+    // Scroll into view cleanly even while frozen in Edit mode
+    const r0 = el.getBoundingClientRect();
+    if (r0.bottom < 0 || r0.top > window.innerHeight || r0.right < 0 || r0.left > window.innerWidth) {
+      restoringFrozenScroll = true;
+      try {
+        el.scrollIntoView({ block: 'center', inline: 'nearest' });
+        frozenWindowScroll = { x: window.scrollX || 0, y: window.scrollY || 0 };
+      } catch (_) {}
+      restoringFrozenScroll = false;
+    }
+
+    const r = (activeGroupSelectionId ? getSelectionBounds() : el.getBoundingClientRect()) || r0;
+    flashHighlightRect = { left: r.left - 4, top: r.top - 4, width: r.width + 8, height: r.height + 8 };
+    if (flashHighlightTimer) clearTimeout(flashHighlightTimer);
+    renderOverlays();
+    sendTreeAndSelectionUpdate();
+    flashHighlightTimer = setTimeout(() => {
+      flashHighlightRect = null;
+      renderOverlays();
+    }, 750);
+    return true;
   }
 
   function collectDomHierarchy() {
@@ -1381,6 +1894,26 @@
     }
   }
 
+  function isVisuallyTransparentDiv(el) {
+    if (!el || el.nodeType !== 1) return false;
+    const tag = el.tagName.toUpperCase();
+    if (tag !== 'DIV' && tag !== 'SPAN') return false;
+    if (el.getAttribute('data-vc-unfill-fill') === '1' && el.getAttribute('data-vc-unfill-stroke') === '1') {
+      return !hasDirectNonEmptyText(el);
+    }
+    const cs = getComputedStyle(el);
+    const bgHex = rgbToHex(cs.backgroundColor);
+    const hasBgImg = Boolean(cs.backgroundImage && cs.backgroundImage !== 'none');
+    const bw =
+      (parseFloat(cs.borderTopWidth) || 0) +
+      (parseFloat(cs.borderRightWidth) || 0) +
+      (parseFloat(cs.borderBottomWidth) || 0) +
+      (parseFloat(cs.borderLeftWidth) || 0);
+    const hasBorder = bw > 0 && cs.borderTopStyle !== 'none';
+    const hasShadow = Boolean(cs.boxShadow && cs.boxShadow !== 'none');
+    return !bgHex && !hasBgImg && !hasBorder && !hasShadow && !hasDirectNonEmptyText(el);
+  }
+
   function resolveSelectableTarget(rawTarget, toolOverride, opts = {}) {
     const t = toolOverride || activeTool;
     const directSubSelect = Boolean(opts.directSubSelect) || t === 'direct';
@@ -1394,6 +1927,14 @@
       el = el.closest('svg') || el.parentElement;
     }
     if (!el || isBridgeNode(el)) return null;
+
+    const activeIso = getActiveIsolation();
+    if (activeIso) {
+      if (!isElementInsideActiveIsolation(el)) return null;
+      if (activeIso.kind === 'container' && ensureVcId(el) === activeIso.id && !opts.allowIsolatedRoot) {
+        return null;
+      }
+    }
 
     if (t === 'section') {
       collectNamedSessions();
@@ -1415,7 +1956,7 @@
     // With Selection tool (V), promote inner icon/span inside <button>/<a> to the button when Smart Btns is on (unless directSubSelect)
     if (t === 'select' && autoGroupButtons && !directSubSelect) {
       const btn = el.closest('button, a, [role="button"]');
-      if (btn && !isBridgeNode(btn)) {
+      if (btn && !isBridgeNode(btn) && (!activeIso || isElementInsideActiveIsolation(btn))) {
         el = btn;
       }
     }
@@ -1428,9 +1969,49 @@
     }
     if (!el || el === document.body || el === document.documentElement) return null;
     if (t === 'select' && !directSubSelect && isStructuralGridWrapper(el)) return null;
+    if (activeIso) {
+      if (!isElementInsideActiveIsolation(el)) return null;
+      if (activeIso.kind === 'container' && ensureVcId(el) === activeIso.id && !opts.allowIsolatedRoot) return null;
+    }
 
     const vcId = ensureVcId(el);
     if (isEntityLocked(vcId)) return null;
+
+    // Invisible-Over-Visible Div Rim Inset Rule (8px outer rim hits the visible underlying div; inner area hits the invisible div!)
+    if (
+      !opts.skipRimInset &&
+      opts.clientX !== undefined &&
+      opts.clientY !== undefined &&
+      !selectedIds.includes(vcId) &&
+      isVisuallyTransparentDiv(el)
+    ) {
+      const er = el.getBoundingClientRect();
+      const stack = document.elementsFromPoint(opts.clientX, opts.clientY);
+      for (const under of stack) {
+        if (!under || under === el || isBridgeNode(under) || under === document.body || under === document.documentElement) continue;
+        if (isStructuralGridWrapper(under) || isVisuallyTransparentDiv(under)) continue;
+        if (activeIso && !isElementInsideActiveIsolation(under)) continue;
+        const ur = under.getBoundingClientRect();
+        const sameFootprint =
+          Math.abs(er.left - ur.left) <= 12 &&
+          Math.abs(er.top - ur.top) <= 12 &&
+          Math.abs(er.width - ur.width) <= 24 &&
+          Math.abs(er.height - ur.height) <= 24;
+        if (sameFootprint) {
+          const onOuterRim =
+            opts.clientX - ur.left <= 8 ||
+            ur.right - opts.clientX <= 8 ||
+            opts.clientY - ur.top <= 8 ||
+            ur.bottom - opts.clientY <= 8;
+          if (onOuterRim) {
+            const resolvedUnder = resolveSelectableTarget(under, toolOverride, { ...opts, skipRimInset: true });
+            if (resolvedUnder) return resolvedUnder;
+          }
+          break;
+        }
+      }
+    }
+
     return el;
   }
 
@@ -1794,16 +2375,21 @@
     const cs = firstEl ? getComputedStyle(firstEl) : null;
     const bgImg = cs ? cs.backgroundImage : 'none';
     const bgHex = cs ? rgbToHex(cs.backgroundColor) : '';
-    const fillMode = bgImg && bgImg.includes('linear-gradient')
-      ? 'linear'
-      : bgImg && bgImg.includes('radial-gradient')
-        ? 'radial'
-        : bgHex
-          ? 'solid'
-          : 'none';
+    const unfillFill = firstEl ? firstEl.getAttribute('data-vc-unfill-fill') === '1' : false;
+    const unfillStroke = firstEl ? firstEl.getAttribute('data-vc-unfill-stroke') === '1' : false;
+    const fillMode = unfillFill
+      ? 'none'
+      : bgImg && bgImg.includes('linear-gradient')
+        ? 'linear'
+        : bgImg && bgImg.includes('radial-gradient')
+          ? 'radial'
+          : bgHex
+            ? 'solid'
+            : 'none';
 
     const borderW = cs ? parseFloat(cs.borderTopWidth) || 0 : 0;
     const strokeHex = cs ? rgbToHex(cs.borderTopColor) : '#78716c';
+    const strokeMode = !unfillStroke && borderW > 0 && cs && cs.borderTopStyle !== 'none' ? 'solid' : 'none';
 
     const grpLabel = activeGroupSelectionId && groupsById.has(activeGroupSelectionId)
       ? `${groupsById.get(activeGroupSelectionId).name} (${selectedIds.length} items)`
@@ -1836,9 +2422,12 @@
         zIndex: cs.zIndex === 'auto' ? '' : cs.zIndex,
         opacity: Math.round((parseFloat(cs.opacity ?? '1') || 1) * 100),
         fillMode,
+        unfillFill,
         fillColor: bgHex || '#f97316',
         fillGradient: bgImg && bgImg !== 'none' ? bgImg : '',
-        strokeWidth: Math.round(borderW * 10) / 10,
+        strokeMode,
+        unfillStroke,
+        strokeWidth: unfillStroke ? 0 : Math.round(borderW * 10) / 10,
         strokeStyle: cs.borderTopStyle && cs.borderTopStyle !== 'none' ? cs.borderTopStyle : 'solid',
         strokeColor: strokeHex || '#78716c',
         fontFamily: (cs.fontFamily || '').split(',')[0].replace(/["']/g, '').trim(),
@@ -1849,6 +2438,7 @@
         color: rgbToHex(cs.color) || '#ece9e5',
         textAlign: cs.textAlign || 'left',
         text: readEditableTextFromElement(firstEl),
+        linkInfo: extractElementLinkInfo(firstEl),
         inlineStyle: firstEl.getAttribute('style') || '',
         boxModel: {
           mt: Math.round(parseFloat(cs.marginTop) || 0),
@@ -1871,6 +2461,8 @@
     const layers = collectLayersList();
     const domTree = collectDomHierarchy();
     const selection = buildSelectionPayload();
+    const links = collectPageLinks();
+    const activeIso = getActiveIsolation();
     const views = window.__VC_PREBYPASS__?.discoverSwitchableViews?.() || [];
     sendToStudio({
       type: 'vc_state_sync',
@@ -1878,6 +2470,10 @@
       layers,
       domTree,
       selection,
+      links,
+      isolation: activeIso
+        ? { active: true, stack: isolationStack.map((s) => ({ id: s.id, name: s.name, kind: s.kind })) }
+        : { active: false, stack: [] },
       views,
       lockedCount: lockedIds.size,
       artboardRect: getArtboardMetrics()
@@ -1935,6 +2531,36 @@
     const root = ensureOverlayRoot();
     root.innerHTML = '';
     if (mode !== 'edit') return;
+
+    // Group / Container Isolation Mode dashed frame
+    const activeIso = getActiveIsolation();
+    if (activeIso) {
+      const ib = getIsolatedBounds();
+      if (ib) {
+        const isoBox = document.createElement('div');
+        isoBox.className = '__vc_iso_frame__';
+        isoBox.style.left = `${ib.left - 4}px`;
+        isoBox.style.top = `${ib.top - 4}px`;
+        isoBox.style.width = `${ib.width + 8}px`;
+        isoBox.style.height = `${ib.height + 8}px`;
+        const isoPill = document.createElement('div');
+        isoPill.className = '__vc_iso_pill__';
+        isoPill.textContent = `Isolated: ${activeIso.name}`;
+        isoBox.appendChild(isoPill);
+        root.appendChild(isoBox);
+      }
+    }
+
+    // Link target flash highlight box
+    if (flashHighlightRect) {
+      const fb = document.createElement('div');
+      fb.className = '__vc_link_flash__';
+      fb.style.left = `${flashHighlightRect.left - 3}px`;
+      fb.style.top = `${flashHighlightRect.top - 3}px`;
+      fb.style.width = `${flashHighlightRect.width + 6}px`;
+      fb.style.height = `${flashHighlightRect.height + 6}px`;
+      root.appendChild(fb);
+    }
 
     // Named Sessions framing when Session tool (S) or "All Sessions" is active
     if (showAllSessionsOverlay || activeTool === 'section') {
@@ -2201,9 +2827,29 @@
       el.style.position = 'absolute';
       recordPatchedProp(el, 'position', 'absolute');
     }
-    if (el.getAttribute('data-vc-created') === 'shape' || cs.position === 'absolute') {
-      const curLeft = parseFloat(el.style.left || cs.left) || 0;
-      const curTop = parseFloat(el.style.top || cs.top) || 0;
+    const isShape = el.getAttribute('data-vc-created') === 'shape';
+    const canUseLeftTop =
+      isShape ||
+      (cs.position === 'absolute' &&
+        (Boolean(el.style.left) || cs.right === 'auto') &&
+        (Boolean(el.style.top) || cs.bottom === 'auto') &&
+        (!cs.transform || cs.transform === 'none' || Boolean(el.getAttribute('data-vc-tx'))));
+
+    if (canUseLeftTop) {
+      if (!isShape) {
+        if (cs.right !== 'auto' && !el.style.right) {
+          el.style.right = 'auto';
+          recordPatchedProp(el, 'right', 'auto');
+        }
+        if (cs.bottom !== 'auto' && !el.style.bottom) {
+          el.style.bottom = 'auto';
+          recordPatchedProp(el, 'bottom', 'auto');
+        }
+      }
+      const rawLeft = parseFloat(el.style.left || cs.left);
+      const rawTop = parseFloat(el.style.top || cs.top);
+      const curLeft = Number.isFinite(rawLeft) ? rawLeft : (el.offsetLeft || 0);
+      const curTop = Number.isFinite(rawTop) ? rawTop : (el.offsetTop || 0);
       const prevTx = parseFloat(el.getAttribute('data-vc-tx') || '0') || 0;
       const prevTy = parseFloat(el.getAttribute('data-vc-ty') || '0') || 0;
       const dx = newTx - prevTx;
@@ -2223,6 +2869,12 @@
         recordPatchedProp(el, 'transform', rotStr || null);
       }
       return;
+    }
+
+    // CSS transform has NO effect on display:inline elements (<a>, <span>, <label>, <strong>) -> promote to inline-block!
+    if (cs.display === 'inline') {
+      el.style.display = 'inline-block';
+      recordPatchedProp(el, 'display', 'inline-block');
     }
 
     el.setAttribute('data-vc-tx', String(newTx));
@@ -3069,12 +3721,17 @@
     const my0 = box.top;
     const mx1 = box.left + box.width;
     const my1 = box.top + box.height;
+    const activeIso = getActiveIsolation();
 
     const rawCandidates = [];
     const all = document.body ? document.body.querySelectorAll('*') : [];
     for (const el of all) {
       if (isBridgeNode(el) || isStructuralGridWrapper(el)) continue;
       if (['PATH', 'G', 'CIRCLE', 'RECT', 'LINE', 'POLYLINE', 'POLYGON', 'DEFS', 'STOP', 'USE', 'OPTION', 'BR', 'WBR'].includes(el.tagName.toUpperCase())) continue;
+      if (activeIso) {
+        if (!isElementInsideActiveIsolation(el)) continue;
+        if (activeIso.kind === 'container' && ensureVcId(el) === activeIso.id) continue;
+      }
       const vcId = ensureVcId(el);
       if (!vcId || isEntityLocked(vcId)) continue;
       if (!isElementVisible(el)) continue;
@@ -3083,15 +3740,15 @@
       if (r.width < 4 || r.height < 4) continue;
 
       // Illustrator intersection check: pure bounding-box overlap selects ALL objects at this region,
-      // including lower / occluded / z-underneath objects completely covered by foreground layers!
+      // including lower / occluded / z-underneath objects and invisible/empty <div> boxes!
       const intersects = !(r.right < mx0 || r.left > mx1 || r.bottom < my0 || r.top > my1);
       if (!intersects) continue;
 
       const isCreated = el.hasAttribute('data-vc-created') || el.classList.contains('vc-shape') || el.classList.contains('vc-flow-div');
       if (!isCreated) {
         const enclosesMarquee = r.left < mx0 - 6 && r.right > mx1 + 6 && r.top < my0 - 6 && r.bottom > my1 + 6;
-        // Skip broad layout containers that completely enclose the marquee so marqueeing inside a card selects the objects inside & behind!
-        if (enclosesMarquee && (el.matches('section, header, nav, aside, footer, .card, .cbody, .shead') || el.children.length > 1)) {
+        // Skip broad layout containers ONLY when they completely enclose the marquee AND have child elements inside
+        if (enclosesMarquee && (el.matches('section, header, nav, aside, footer') || el.children.length >= 1)) {
           continue;
         }
       }
@@ -3100,8 +3757,8 @@
     }
 
     // Filter out inner spans/icons inside matched <button>/<a> (when Smart Btns is on),
-    // AND filter out layout wrapper ancestors when their own child controls are also matched (avoiding parent+child double selection),
-    // while NEVER filtering out sibling/non-ancestor overlapping lower objects!
+    // AND filter out layout wrapper ancestors ONLY when the wrapper is NOT completely enclosed by the marquee
+    // and its own child controls are matched, while keeping standalone/empty/enclosed <div> boxes selectable!
     const rawSet = new Set(rawCandidates);
     const matchedEls = rawCandidates.filter((el) => {
       if (autoGroupButtons && activeTool !== 'direct') {
@@ -3110,18 +3767,23 @@
       }
       const isCreated = el.hasAttribute('data-vc-created') || el.classList.contains('vc-shape') || el.classList.contains('vc-flow-div');
       if (!isCreated && !['BUTTON', 'A', 'INPUT', 'SELECT', 'TEXTAREA', 'IMG', 'CANVAS', 'SVG'].includes(el.tagName.toUpperCase())) {
-        // If one of its DOM descendants is also in rawCandidates, prefer the selectable child controls over an ungrouped wrapper div
-        const hasMatchedDescendant = rawCandidates.some((other) => other !== el && el.contains(other));
-        if (hasMatchedDescendant) return false;
+        const r = el.getBoundingClientRect();
+        const fullyEnclosedByMarquee = r.left >= mx0 - 2 && r.right <= mx1 + 2 && r.top >= my0 - 2 && r.bottom <= my1 + 2;
+        if (!fullyEnclosedByMarquee) {
+          const hasMatchedDescendant = rawCandidates.some((other) => other !== el && el.contains(other));
+          if (hasMatchedDescendant) return false;
+        }
       }
       return true;
     });
 
     const refinedIds = [];
+    const matchedGroups = new Set();
     for (const el of matchedEls) {
       const vcId = ensureVcId(el);
       const topGrp = activeTool !== 'direct' ? getTopmostGroupOf(vcId) : null;
       if (topGrp && !isEntityLocked(topGrp)) {
+        matchedGroups.add(topGrp);
         for (const lid of expandGroupLeafIds(topGrp)) {
           if (!refinedIds.includes(lid)) refinedIds.push(lid);
         }
@@ -3134,10 +3796,20 @@
       for (const id of refinedIds) {
         if (!selectedIds.includes(id)) selectedIds.push(id);
       }
+      activeGroupSelectionId = null;
     } else {
       selectedIds = refinedIds;
+      if (matchedGroups.size === 1) {
+        const singleGrp = Array.from(matchedGroups)[0];
+        const grpLeaves = expandGroupLeafIds(singleGrp, []);
+        activeGroupSelectionId =
+          selectedIds.length === grpLeaves.length && grpLeaves.every((id) => selectedIds.includes(id))
+            ? singleGrp
+            : null;
+      } else {
+        activeGroupSelectionId = null;
+      }
     }
-    activeGroupSelectionId = null;
     keyObjectId = null;
     renderOverlays();
     sendTreeAndSelectionUpdate();
@@ -3545,89 +4217,188 @@
   // =========================================================================
   // 14. ILLUSTRATOR ALIGN & DISTRIBUTE + INSPECTOR STYLE PATCHING + FONTS
   // =========================================================================
-  function alignSelection(alignType, gapPx = 0) {
+  function collectAlignmentUnits() {
     pruneDisconnectedSelection();
-    if (!selectedIds.length) return;
-    const items = selectedIds.map((id) => {
-      const el = getEl(id);
-      if (!el) return null;
-      const { tx, ty, rot } = readElementTranslate(el);
-      return { id, el, before: snapshotElementState(el), r: el.getBoundingClientRect(), tx, ty, rot };
-    }).filter(Boolean);
-    if (!items.length) return;
+    if (!selectedIds.length) return [];
 
-    const br = document.body ? document.body.getBoundingClientRect() : { left: 0, top: 0, right: artboardWidth, bottom: artboardHeight, width: artboardWidth, height: artboardHeight };
-    let refRect = br;
-    if (alignKeyMode === '__key__' && keyObjectId) {
-      const kItem = items.find((i) => i.id === keyObjectId);
-      if (kItem) refRect = kItem.r;
-    } else if (alignKeyMode === '__bounds__' && items.length > 1) {
-      const sb = getSelectionBounds();
-      if (sb) refRect = sb;
+    const units = [];
+    const consumedIds = new Set();
+
+    if (activeTool !== 'direct') {
+      for (const id of selectedIds) {
+        if (consumedIds.has(id)) continue;
+        const topGrp = getTopmostGroupOf(id);
+        if (topGrp && groupsById.has(topGrp)) {
+          const grpLeaves = expandGroupLeafIds(topGrp, []);
+          const allSelected = grpLeaves.length > 0 && grpLeaves.every((lid) => selectedIds.includes(lid));
+          if (allSelected) {
+            grpLeaves.forEach((lid) => consumedIds.add(lid));
+            const rawEls = grpLeaves.map(getEl).filter(Boolean);
+            const topEls = rawEls.filter((el) => !rawEls.some((other) => other !== el && other.contains(el)));
+            if (!topEls.length) continue;
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            const members = topEls.map((el) => {
+              const r = el.getBoundingClientRect();
+              minX = Math.min(minX, r.left);
+              minY = Math.min(minY, r.top);
+              maxX = Math.max(maxX, r.right);
+              maxY = Math.max(maxY, r.bottom);
+              const { tx, ty, rot } = readElementTranslate(el);
+              return { el, before: snapshotElementState(el), tx, ty, rot };
+            });
+            units.push({
+              unitId: topGrp,
+              isKey: Boolean(keyObjectId && grpLeaves.includes(keyObjectId)),
+              r: { left: minX, top: minY, right: maxX, bottom: maxY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) },
+              members
+            });
+          }
+        }
+      }
     }
 
-    if (alignType.startsWith('dist-') && items.length >= 3) {
+    const remItems = selectedIds
+      .filter((id) => !consumedIds.has(id))
+      .map((id) => ({ id, el: getEl(id) }))
+      .filter((x) => Boolean(x.el));
+
+    const topRemItems = remItems.filter(
+      (item) => !remItems.some((other) => other.el !== item.el && other.el.contains(item.el))
+    );
+
+    for (const { id, el } of topRemItems) {
+      const r = el.getBoundingClientRect();
+      const { tx, ty, rot } = readElementTranslate(el);
+      units.push({
+        unitId: id,
+        isKey: id === keyObjectId,
+        r: { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: Math.max(1, r.width), height: Math.max(1, r.height) },
+        members: [{ el, before: snapshotElementState(el), tx, ty, rot }]
+      });
+    }
+
+    return units;
+  }
+
+  function shiftAlignmentUnit(unit, dx, dy) {
+    for (const m of unit.members) {
+      if (getComputedStyle(m.el).display === 'inline') {
+        m.el.style.display = 'inline-block';
+        recordPatchedProp(m.el, 'display', 'inline-block');
+      }
+    }
+    if (Math.abs(dx) < 0.05 && Math.abs(dy) < 0.05) return;
+    for (const m of unit.members) {
+      applyElementPositionOffset(m.el, m.tx + dx, m.ty + dy, m.rot);
+    }
+  }
+
+  function alignSelection(alignType, gapPx = 0) {
+    const units = collectAlignmentUnits();
+    if (!units.length) return;
+
+    const br = document.body
+      ? document.body.getBoundingClientRect()
+      : { left: 0, top: 0, right: artboardWidth, bottom: artboardHeight, width: artboardWidth, height: artboardHeight };
+    const isoBounds = getActiveIsolation() ? getIsolatedBounds() : null;
+
+    let unionMinX = Infinity, unionMinY = Infinity, unionMaxX = -Infinity, unionMaxY = -Infinity;
+    for (const u of units) {
+      unionMinX = Math.min(unionMinX, u.r.left);
+      unionMinY = Math.min(unionMinY, u.r.top);
+      unionMaxX = Math.max(unionMaxX, u.r.right);
+      unionMaxY = Math.max(unionMaxY, u.r.bottom);
+    }
+    const unionRect = {
+      left: unionMinX,
+      top: unionMinY,
+      right: unionMaxX,
+      bottom: unionMaxY,
+      width: Math.max(1, unionMaxX - unionMinX),
+      height: Math.max(1, unionMaxY - unionMinY)
+    };
+
+    let refRect = br;
+    if (alignKeyMode === '__artboard__') {
+      refRect = br;
+    } else if (alignKeyMode === '__key__' && keyObjectId) {
+      const kUnit = units.find((u) => u.isKey);
+      refRect = kUnit ? kUnit.r : (units.length > 1 ? unionRect : (isoBounds || br));
+    } else if (units.length > 1) {
+      refRect = unionRect;
+    } else {
+      refRect = isoBounds || br;
+    }
+
+    if (alignType.startsWith('dist-') && units.length >= 3) {
       if (['dist-left', 'dist-x', 'dist-right'].includes(alignType)) {
-        const sorted = [...items].sort((a, b) => a.r.left - b.r.left);
+        const sorted = [...units].sort((a, b) => a.r.left - b.r.left);
         const first = sorted[0];
         const last = sorted[sorted.length - 1];
         const spanStart = alignType === 'dist-left' ? first.r.left : alignType === 'dist-right' ? first.r.right : (first.r.left + first.r.right) / 2;
         const spanEnd = alignType === 'dist-left' ? last.r.left : alignType === 'dist-right' ? last.r.right : (last.r.left + last.r.right) / 2;
         const step = (spanEnd - spanStart) / (sorted.length - 1);
-        sorted.forEach((it, idx) => {
+        sorted.forEach((u, idx) => {
           if (idx === 0 || idx === sorted.length - 1) return;
           const target = spanStart + step * idx;
-          const cur = alignType === 'dist-left' ? it.r.left : alignType === 'dist-right' ? it.r.right : (it.r.left + it.r.right) / 2;
-          applyElementPositionOffset(it.el, it.tx + (target - cur), it.ty, it.rot);
+          const cur = alignType === 'dist-left' ? u.r.left : alignType === 'dist-right' ? u.r.right : (u.r.left + u.r.right) / 2;
+          shiftAlignmentUnit(u, target - cur, 0);
         });
       } else {
-        const sorted = [...items].sort((a, b) => a.r.top - b.r.top);
+        const sorted = [...units].sort((a, b) => a.r.top - b.r.top);
         const first = sorted[0];
         const last = sorted[sorted.length - 1];
         const spanStart = alignType === 'dist-top' ? first.r.top : alignType === 'dist-bottom' ? first.r.bottom : (first.r.top + first.r.bottom) / 2;
         const spanEnd = alignType === 'dist-top' ? last.r.top : alignType === 'dist-bottom' ? last.r.bottom : (last.r.top + last.r.bottom) / 2;
         const step = (spanEnd - spanStart) / (sorted.length - 1);
-        sorted.forEach((it, idx) => {
+        sorted.forEach((u, idx) => {
           if (idx === 0 || idx === sorted.length - 1) return;
           const target = spanStart + step * idx;
-          const cur = alignType === 'dist-top' ? it.r.top : alignType === 'dist-bottom' ? it.r.bottom : (it.r.top + it.r.bottom) / 2;
-          applyElementPositionOffset(it.el, it.tx, it.ty + (target - cur), it.rot);
+          const cur = alignType === 'dist-top' ? u.r.top : alignType === 'dist-bottom' ? u.r.bottom : (u.r.top + u.r.bottom) / 2;
+          shiftAlignmentUnit(u, 0, target - cur);
         });
       }
-    } else if ((alignType === 'space-x' || alignType === 'space-y') && items.length >= 2) {
+    } else if ((alignType === 'space-x' || alignType === 'space-y') && units.length >= 2) {
       const isX = alignType === 'space-x';
-      const sorted = [...items].sort((a, b) => (isX ? a.r.left - b.r.left : a.r.top - b.r.top));
+      const sorted = [...units].sort((a, b) => (isX ? a.r.left - b.r.left : a.r.top - b.r.top));
       let cursor = isX ? sorted[0].r.right : sorted[0].r.bottom;
       for (let i = 1; i < sorted.length; i++) {
-        const it = sorted[i];
+        const u = sorted[i];
         if (isX) {
-          const dx = cursor + gapPx - it.r.left;
-          applyElementPositionOffset(it.el, it.tx + dx, it.ty, it.rot);
-          cursor = cursor + gapPx + it.r.width;
+          const dx = cursor + gapPx - u.r.left;
+          shiftAlignmentUnit(u, dx, 0);
+          cursor = cursor + gapPx + u.r.width;
         } else {
-          const dy = cursor + gapPx - it.r.top;
-          applyElementPositionOffset(it.el, it.tx, it.ty + dy, it.rot);
-          cursor = cursor + gapPx + it.r.height;
+          const dy = cursor + gapPx - u.r.top;
+          shiftAlignmentUnit(u, 0, dy);
+          cursor = cursor + gapPx + u.r.height;
         }
       }
     } else {
-      for (const it of items) {
-        if (alignKeyMode === '__key__' && it.id === keyObjectId) continue;
+      for (const u of units) {
+        if (alignKeyMode === '__key__' && u.isKey && units.length > 1) continue;
         let dx = 0;
         let dy = 0;
-        if (alignType === 'left') dx = refRect.left - it.r.left;
-        else if (alignType === 'center-x') dx = (refRect.left + refRect.right) / 2 - (it.r.left + it.r.right) / 2;
-        else if (alignType === 'right') dx = refRect.right - it.r.right;
-        else if (alignType === 'top') dy = refRect.top - it.r.top;
-        else if (alignType === 'center-y') dy = (refRect.top + refRect.bottom) / 2 - (it.r.top + it.r.bottom) / 2;
-        else if (alignType === 'bottom') dy = refRect.bottom - it.r.bottom;
-        applyElementPositionOffset(it.el, it.tx + dx, it.ty + dy, it.rot);
+        if (alignType === 'left') dx = refRect.left - u.r.left;
+        else if (alignType === 'center-x') dx = (refRect.left + refRect.right) / 2 - (u.r.left + u.r.right) / 2;
+        else if (alignType === 'right') dx = refRect.right - u.r.right;
+        else if (alignType === 'top') dy = refRect.top - u.r.top;
+        else if (alignType === 'center-y') dy = (refRect.top + refRect.bottom) / 2 - (u.r.top + u.r.bottom) / 2;
+        else if (alignType === 'bottom') dy = refRect.bottom - u.r.bottom;
+        shiftAlignmentUnit(u, dx, dy);
       }
     }
 
+    syncAuthoritativeStyleRules();
+    const entries = [];
+    for (const u of units) {
+      for (const m of u.members) {
+        entries.push({ kind: 'style', before: m.before, after: snapshotElementState(m.el) });
+      }
+    }
     pushHistoryStep({
       label: `Align (${alignType})`,
-      entries: items.map((it) => ({ kind: 'style', before: it.before, after: snapshotElementState(it.el) }))
+      entries
     });
     renderOverlays();
     sendTreeAndSelectionUpdate();
@@ -3837,7 +4608,7 @@
   function applyStylePatchFromInspector(patchMsg) {
     pruneDisconnectedSelection();
     if (!selectedIds.length) return;
-    const { props, previewOnly, commitScrub, googleFont, scalePercent, xPos, yPos, rotateDeg } = patchMsg;
+    const { props, previewOnly, commitScrub, googleFont, scalePercent, xPos, yPos, rotateDeg, unfillTarget } = patchMsg;
 
     if (!pendingScrubStep) {
       pendingScrubStep = selectedIds.map((id) => {
@@ -3910,7 +4681,46 @@
         }
       }
 
+      if (unfillTarget === 'fill') {
+        el.setAttribute('data-vc-unfill-fill', '1');
+        el.style.setProperty('background', 'none');
+        el.style.setProperty('background-color', 'transparent');
+        el.style.setProperty('background-image', 'none');
+        recordPatchedProp(el, 'background', 'none');
+        recordPatchedProp(el, 'background-color', 'transparent');
+        recordPatchedProp(el, 'background-image', 'none');
+      } else if (unfillTarget === 'stroke') {
+        el.setAttribute('data-vc-unfill-stroke', '1');
+        el.style.setProperty('border', 'none');
+        el.style.setProperty('border-width', '0px');
+        el.style.setProperty('border-style', 'none');
+        el.style.setProperty('border-color', 'transparent');
+        recordPatchedProp(el, 'border', 'none');
+        recordPatchedProp(el, 'border-width', '0px');
+        recordPatchedProp(el, 'border-style', 'none');
+        recordPatchedProp(el, 'border-color', 'transparent');
+      }
+
       if (props && typeof props === 'object') {
+        const hasVisibleFill =
+          (props.backgroundColor && props.backgroundColor !== 'transparent' && props.backgroundColor !== 'rgba(0, 0, 0, 0)') ||
+          (props.backgroundImage && props.backgroundImage !== 'none');
+        if (hasVisibleFill && unfillTarget !== 'fill') {
+          el.removeAttribute('data-vc-unfill-fill');
+          if (el.style.background === 'none') el.style.removeProperty('background');
+          recordPatchedProp(el, 'background', null);
+        }
+
+        const nextBw = props.borderWidth !== undefined ? parseFloat(props.borderWidth) : NaN;
+        const hasVisibleStroke = (!Number.isNaN(nextBw) && nextBw > 0) || (props.borderStyle && props.borderStyle !== 'none' && Number.isNaN(nextBw) && el.getAttribute('data-vc-unfill-stroke') !== '1');
+        if (!Number.isNaN(nextBw) && nextBw === 0) {
+          el.setAttribute('data-vc-unfill-stroke', '1');
+        } else if (hasVisibleStroke && unfillTarget !== 'stroke') {
+          el.removeAttribute('data-vc-unfill-stroke');
+          if (el.style.border === 'none') el.style.removeProperty('border');
+          recordPatchedProp(el, 'border', null);
+        }
+
         for (const [k, v] of Object.entries(props)) {
           const kebab = k.replace(/[A-Z]/g, (m) => '-' + m.toLowerCase());
           if (v === null || v === '') {
@@ -3924,6 +4734,7 @@
       }
     }
 
+    syncAuthoritativeStyleRules();
     renderOverlays();
 
     if (!previewOnly || commitScrub) {
@@ -4129,7 +4940,7 @@
     if (mode !== 'edit') return;
     ev.preventDefault();
     ev.stopPropagation();
-    const hit = resolveSelectableTarget(ev.target);
+    const hit = resolveSelectableTarget(ev.target, activeTool, { clientX: ev.clientX, clientY: ev.clientY });
     if (hit) {
       const vcId = ensureVcId(hit);
       if (!selectedIds.includes(vcId)) {
@@ -4142,6 +4953,7 @@
       clientY: ev.clientY,
       selectionCount: selectedIds.length,
       hasGroup: Boolean(activeGroupSelectionId || selectedIds.some((id) => getTopmostGroupOf(id))),
+      inIsolation: Boolean(getActiveIsolation()),
       hasLocked: lockedIds.size > 0
     });
   }, true);
@@ -4292,7 +5104,44 @@
     }
 
     // Selection (V) / Direct (A) / Transform (E) / Session (S)
-    const hit = resolveSelectableTarget(ev.target, effectiveTool);
+    pruneDisconnectedSelection();
+
+    // 1) Hold active Group selection when pressing anywhere inside the selected group's bounds (including gaps between members!)
+    if (!ev.shiftKey && ['select', 'transform'].includes(effectiveTool) && activeGroupSelectionId && groupsById.has(activeGroupSelectionId)) {
+      const grpBounds = getSelectionBounds();
+      if (
+        grpBounds &&
+        ev.clientX >= grpBounds.left - 2 &&
+        ev.clientX <= grpBounds.right + 2 &&
+        ev.clientY >= grpBounds.top - 2 &&
+        ev.clientY <= grpBounds.bottom + 2
+      ) {
+        startMoveDrag(ev, null, false);
+        return;
+      }
+    }
+
+    const hit = resolveSelectableTarget(ev.target, effectiveTool, { clientX: ev.clientX, clientY: ev.clientY });
+
+    // 2) Hold already-selected invisible / transparent / hollow <div> when pressing anywhere in its empty middle (`majkhane faka jaga`)!
+    if (!ev.shiftKey && ['select', 'direct', 'transform'].includes(effectiveTool) && selectedIds.length > 0) {
+      for (const sid of selectedIds) {
+        const selEl = getEl(sid);
+        if (!selEl || !isElementVisible(selEl)) continue;
+        const sr = selEl.getBoundingClientRect();
+        const insideSelRect =
+          ev.clientX >= sr.left &&
+          ev.clientX <= sr.right &&
+          ev.clientY >= sr.top &&
+          ev.clientY <= sr.bottom;
+        if (!insideSelRect) continue;
+        if (isVisuallyTransparentDiv(selEl) || !hit || hit === selEl) {
+          startMoveDrag(ev, selEl, false);
+          return;
+        }
+      }
+    }
+
     if (!hit) {
       // Dragging on empty artboard/pasteboard starts Illustrator intersection marquee!
       if (!ev.shiftKey) {
@@ -4314,16 +5163,24 @@
     }
 
     const vcId = ensureVcId(hit);
-    // If pressing directly on the background of an UNSELECTED section/card container (not a child button/text/shape),
-    // clicking selects the card, while dragging >= 5px draws an Illustrator marquee across the objects inside & behind!
-    const isUnselectedBroadContainer =
+    // Only full-bleed page landmarks (section/header/nav/aside/footer >= 75% artboard width) start background marquee;
+    // ALL <div>s (.card, .cbody, flow divs, custom divs) immediately select and drag in one fluid motion!
+    const hitRect = hit.getBoundingClientRect();
+    const isCreatedBox = hit.hasAttribute('data-vc-created') || hit.classList.contains('vc-shape') || hit.classList.contains('vc-flow-div');
+    const isFullWidthTransparentWrapperDiv =
+      hit.tagName === 'DIV' &&
+      !isCreatedBox &&
+      hitRect.width >= artboardWidth * 0.75 &&
+      isVisuallyTransparentDiv(hit) &&
+      hit.children.length >= 1;
+    const isUnselectedPageLandmark =
       effectiveTool === 'select' &&
       !selectedIds.includes(vcId) &&
-      (ev.target === hit || (ev.target && ev.target.classList && ev.target.classList.contains('cbody'))) &&
-      hit.matches &&
-      hit.matches('section, header, nav, aside, .card, .cbody');
+      ev.target === hit &&
+      hitRect.width >= artboardWidth * 0.75 &&
+      (isFullWidthTransparentWrapperDiv || (hit.tagName !== 'DIV' && hit.matches && hit.matches('section, header, nav, aside, footer')));
 
-    if (isUnselectedBroadContainer) {
+    if (isUnselectedPageLandmark) {
       pointerAction = {
         type: 'pending_container_or_marquee',
         startX: ev.clientX,
@@ -4425,7 +5282,7 @@
     }
 
     const effTool = ctrlHeld && activeTool !== 'select' && activeTool !== 'direct' ? lastSelectionTool : activeTool;
-    const hit = resolveSelectableTarget(ev.target, effTool);
+    const hit = resolveSelectableTarget(ev.target, effTool, { clientX: ev.clientX, clientY: ev.clientY });
     const nextHover = hit ? ensureVcId(hit) : null;
     if (nextHover !== hoverId || altHeld) {
       hoverId = nextHover;
@@ -4515,11 +5372,53 @@
 
   window.addEventListener('dblclick', (ev) => {
     if (mode !== 'edit') return;
+    if (ev.target && ev.target.closest && ev.target.closest('#__vc_overlay_root__')) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+
+    // 1) Double-click on a composite group (or nested subgroup inside current isolation) -> Enter Group Isolation Mode!
+    const directHit = resolveSelectableTarget(ev.target, 'direct', {
+      directSubSelect: true,
+      clientX: ev.clientX,
+      clientY: ev.clientY
+    });
+    const candGrp = directHit
+      ? getTopmostGroupOf(ensureVcId(directHit))
+      : (activeGroupSelectionId && groupsById.has(activeGroupSelectionId) ? activeGroupSelectionId : null);
+
+    if (candGrp && groupsById.has(candGrp)) {
+      const grp = groupsById.get(candGrp);
+      enterIsolationMode({ id: candGrp, kind: 'group', name: grp.name || 'Group' }, directHit);
+      return;
+    }
+
+    // 2) If Isolation Mode is active and user double-clicks outside the isolated bounds -> Exit Isolation Mode (like Illustrator)!
+    if (getActiveIsolation()) {
+      const ib = getIsolatedBounds();
+      const outside =
+        !ib ||
+        ev.clientX < ib.left - 8 ||
+        ev.clientX > ib.right + 8 ||
+        ev.clientY < ib.top - 8 ||
+        ev.clientY > ib.bottom + 8;
+      if (outside) {
+        exitIsolationMode(true);
+        return;
+      }
+    }
+
+    // 3) Double-click on direct text leaf (ungrouped, or already inside Isolation Mode) -> Inline text editing
     const txtEl = findDirectTextElementAt(ev.target, ev.clientX, ev.clientY);
-    if (txtEl) {
-      ev.preventDefault();
-      ev.stopPropagation();
+    if (txtEl && (txtEl.children.length === 0 || ['BUTTON', 'A', 'H1', 'H2', 'H3', 'H4', 'P', 'SPAN', 'LABEL'].includes(txtEl.tagName))) {
       startInlineTypeEdit(txtEl);
+      return;
+    }
+
+    // 4) Double-click on a multi-child container (div/card/section) -> Enter Container Isolation Mode!
+    if (directHit && directHit.children && directHit.children.length >= 2) {
+      const cid = ensureVcId(directHit);
+      const cname = `${directHit.tagName.toLowerCase()}${directHit.id && !directHit.id.startsWith('vc_') ? '#' + directHit.id : ''}`;
+      enterIsolationMode({ id: cid, kind: 'container', name: cname });
     }
   }, true);
 
@@ -4594,15 +5493,25 @@
       ev.preventDefault();
       deleteSelection();
     } else if (ev.key === 'Escape') {
-      selectedIds = [];
-      activeGroupSelectionId = null;
-      keyObjectId = null;
-      showAllSessionsOverlay = false;
-      renderOverlays();
-      sendTreeAndSelectionUpdate();
+      if (getActiveIsolation()) {
+        exitIsolationMode(false);
+      } else {
+        selectedIds = [];
+        activeGroupSelectionId = null;
+        keyObjectId = null;
+        showAllSessionsOverlay = false;
+        renderOverlays();
+        sendTreeAndSelectionUpdate();
+      }
     } else if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(ev.key) && selectedIds.length) {
       ev.preventDefault();
       nudgeSelectedElements(ev.key, Boolean(ev.shiftKey));
+    } else if (!ctrl && !ev.altKey && ev.key === '/') {
+      ev.preventDefault();
+      sendToStudio({ type: 'vc_shortcut_unfill' });
+    } else if (!ctrl && !ev.altKey && ev.shiftKey && keyLow === 'x') {
+      ev.preventDefault();
+      sendToStudio({ type: 'vc_shortcut_swap_paint' });
     } else if (!ctrl && !ev.altKey) {
       const toolKeys = { v: 'select', a: 'direct', e: 'transform', s: 'section', r: 'shape', d: 'div', t: 'text', i: 'eyedropper', m: 'marquee', n: 'note', h: 'hand', z: 'zoom' };
       if (toolKeys[keyLow]) {
@@ -4668,6 +5577,7 @@
         if (activeTool === 'select' || activeTool === 'direct') lastSelectionTool = activeTool;
         artboardWidth = Number(msg.artboardWidth) || ARTBOARD_DEFAULT_W;
         artboardHeight = Number(msg.artboardHeight) || ARTBOARD_DEFAULT_H;
+        if (msg.accelMode) accelMode = msg.accelMode === 'cpu' ? 'cpu' : 'gpu';
         if (msg.prefs) prefs = { ...prefs, ...msg.prefs };
         if (Array.isArray(msg.notes)) currentNotes = msg.notes;
         applyArtboardMode();
@@ -4675,6 +5585,34 @@
         renderOverlays();
         sendTreeAndSelectionUpdate();
         notifyHistoryAndDirty();
+        break;
+      }
+      case 'exit_isolation': {
+        exitIsolationMode(Boolean(msg.exitAll));
+        break;
+      }
+      case 'enter_isolation': {
+        if (msg.id) {
+          if (groupsById.has(msg.id)) {
+            enterIsolationMode({ id: msg.id, kind: 'group', name: groupsById.get(msg.id).name });
+          } else if (getEl(msg.id)) {
+            enterIsolationMode({ id: msg.id, kind: 'container', name: msg.name || msg.id });
+          }
+        }
+        break;
+      }
+      case 'set_element_link': {
+        setElementLinkWithUndo(msg.vcId, msg.url);
+        break;
+      }
+      case 'focus_link_target': {
+        focusLinkTargetOnArtboard(msg.vcId, msg.selectGroup !== false);
+        break;
+      }
+      case 'set_accel_mode': {
+        accelMode = msg.accelMode === 'cpu' ? 'cpu' : 'gpu';
+        applyArtboardMode();
+        renderOverlays();
         break;
       }
       case 'end_pan': {

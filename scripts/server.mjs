@@ -82,6 +82,7 @@ function defaultPreferences() {
     scaleCorners: true,
     multiScaleMode: 'in-place', // 'in-place' (default) | 'normal'
     keyboardIncrement: 1,
+    accelPreference: 'auto', // 'auto' (GPU-first -> CPU fallback) | 'gpu' | 'cpu'
     defaultMode: 'edit',
     workspaceLayout: 'canvas' // 'canvas' | 'inline'
   };
@@ -198,7 +199,10 @@ function broadcastSse(event, data) {
 
 function copyDirFiltered(src, dest) {
   fs.mkdirSync(dest, { recursive: true });
-  const skip = new Set(['.git', 'node_modules', 'dist', 'dist-web', '_site', '.wrangler', '.vp-memory', 'memory']);
+  const skip = new Set([
+    '.git', 'node_modules', 'dist', 'dist-web', '_site', '.wrangler', '.vp-memory', 'memory',
+    'desktop', 'release', 'win-unpacked', 'mac', 'linux-unpacked', 'out', 'build', '.next', '.cache'
+  ]);
   for (const ent of fs.readdirSync(src, { withFileTypes: true })) {
     if (skip.has(ent.name)) continue;
     const sPath = path.join(src, ent.name);
@@ -254,8 +258,13 @@ let workspaceBackupDir = path.join(BACKUP_ROOT, workspaceId);
 let sessionOriginDir = path.join(BACKUP_ROOT, `${workspaceId}_origin`);
 let savedBaselineDir = path.join(BACKUP_ROOT, `${workspaceId}_saved`);
 
+function normalizeFolderIdentity(p) {
+  return String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+}
+
 function recordWorkspaceBoot() {
   const memBoot = loadMemory();
+  const curFolderKey = normalizeFolderIdentity(originalSourceDir || resolvedTargetDir || args.target);
   memBoot.recentWorkspaces = [
     {
       workspaceId,
@@ -265,8 +274,21 @@ function recordWorkspaceBoot() {
       entry: args.entry,
       openedAt: new Date().toISOString()
     },
-    ...(memBoot.recentWorkspaces || []).filter((w) => w.workspaceId !== workspaceId)
+    ...(memBoot.recentWorkspaces || []).filter((w) => {
+      const wKey = normalizeFolderIdentity(w.originalSourceDir || w.target || '');
+      return w.workspaceId !== workspaceId && (!curFolderKey || wKey !== curFolderKey);
+    })
   ].slice(0, 15);
+  // Deduplicate recentSessions strictly to 1 entry per project folder
+  if (Array.isArray(memBoot.recentSessions)) {
+    const seenSessFolders = new Set();
+    memBoot.recentSessions = memBoot.recentSessions.filter((s) => {
+      const k = normalizeFolderIdentity(s?.originalSourceDir || s?.target || s?.projectName || '');
+      if (!k || seenSessFolders.has(k)) return false;
+      seenSessFolders.add(k);
+      return true;
+    });
+  }
   saveMemory(memBoot);
 }
 recordWorkspaceBoot();
@@ -337,7 +359,10 @@ function listProjectFiles(rootDir) {
   const html = [];
   const css = [];
   const js = [];
-  const skip = new Set(['.git', 'node_modules', 'dist', 'dist-web', '_site', '.wrangler', 'desktop', 'memory', '.vp-memory']);
+  const skip = new Set([
+    '.git', 'node_modules', 'dist', 'dist-web', '_site', '.wrangler', 'desktop', 'memory', '.vp-memory',
+    'release', 'win-unpacked', 'mac', 'linux-unpacked', 'out', 'build', '.next', '.cache'
+  ]);
   function walk(dir, depth = 0) {
     if (depth > 3) return;
     for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -776,6 +801,29 @@ function applyDirectHtmlSave(payload) {
     }
     if (styleEdits.length) {
       htmlContent = applySurgicalReplacements(htmlContent, styleEdits);
+    }
+  }
+
+  // 3B. Apply direct attribute / link patches (href, data-vc-link, target, etc.)
+  const attrPatches = Array.isArray(payload.attrPatches) ? payload.attrPatches : [];
+  if (attrPatches.length && typeof codeSync.mergeAttrsIntoOpenTag === 'function') {
+    const treeA = parseStaticHtmlTree(htmlContent);
+    const attrEdits = [];
+    const seenAttrStarts = new Set();
+    for (const ap of attrPatches) {
+      if (!ap || !ap.attrs || typeof ap.attrs !== 'object') continue;
+      const node = findNodeInTree(treeA, ap.id, ap.selector);
+      if (node && !seenAttrStarts.has(node.start)) {
+        seenAttrStarts.add(node.start);
+        attrEdits.push({
+          start: node.start,
+          end: node.openEnd,
+          replacement: codeSync.mergeAttrsIntoOpenTag(node.openTagRaw, ap.attrs)
+        });
+      }
+    }
+    if (attrEdits.length) {
+      htmlContent = applySurgicalReplacements(htmlContent, attrEdits);
     }
   }
 
@@ -1250,15 +1298,17 @@ const server = http.createServer(async (req, res) => {
       args.entry = fileName;
       ensureWorkspacesSnapshots(fileName, true);
       const mem = loadMemory();
+      const folderKey = normalizeFolderIdentity(originalSourceDir || resolvedTargetDir);
       mem.recentSessions = [
         {
-          id: `${workspaceId}:${fileName}`,
+          id: `${workspaceId}`,
           projectName: path.basename(originalSourceDir || resolvedTargetDir),
           target: resolvedTargetDir,
+          originalSourceDir: originalSourceDir || resolvedTargetDir,
           entry: fileName,
           openedAt: new Date().toISOString()
         },
-        ...(mem.recentSessions || []).filter((s) => !(s.target === resolvedTargetDir && s.entry === fileName))
+        ...(mem.recentSessions || []).filter((s) => normalizeFolderIdentity(s.originalSourceDir || s.target || s.projectName) !== folderKey)
       ].slice(0, 20);
       saveMemory(mem);
       const snap = readWholeFolderTextMap(resolvedTargetDir, false);
