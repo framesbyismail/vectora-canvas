@@ -10,8 +10,76 @@
   window.__VC_PREBYPASS_LOADED__ = true;
 
   // =========================================================================
-  // 0. WEBGL BUFFER PRESERVATION + EDIT-MODE RAF / ANIMATION FREEZE GATE
+  // 0. WEBGL BUFFER PRESERVATION + DYNAMIC VECTOR ZOOM HiDPI + RAF FREEZE GATE
   // =========================================================================
+  const nativeDpr = Math.max(1, Number(window.devicePixelRatio) || 1);
+  window.__vcNativeDpr = nativeDpr;
+  window.__vcZoomScale = 1;
+  try {
+    Object.defineProperty(window, 'devicePixelRatio', {
+      configurable: true,
+      enumerable: true,
+      get() {
+        const z = Math.max(0.15, Number(window.__vcZoomScale) || 1);
+        return z > 1.02 ? Math.min(6, Math.round(nativeDpr * z * 100) / 100) : nativeDpr;
+      }
+    });
+  } catch (_) {}
+
+  const trackedCanvasResizeObservers = new Set();
+  try {
+    const NativeResizeObserver = window.ResizeObserver;
+    if (typeof NativeResizeObserver === 'function') {
+      const WrappedResizeObserver = function (callback) {
+        const inst = new NativeResizeObserver(callback);
+        const observed = new Set();
+        const origObserve = inst.observe.bind(inst);
+        const origUnobserve = inst.unobserve.bind(inst);
+        const origDisconnect = inst.disconnect.bind(inst);
+        inst.observe = function (target, options) {
+          if (target) observed.add(target);
+          return origObserve(target, options);
+        };
+        inst.unobserve = function (target) {
+          if (target) observed.delete(target);
+          return origUnobserve(target);
+        };
+        inst.disconnect = function () {
+          observed.clear();
+          return origDisconnect();
+        };
+        trackedCanvasResizeObservers.add({ callback, inst, observed });
+        return inst;
+      };
+      WrappedResizeObserver.prototype = NativeResizeObserver.prototype;
+      window.ResizeObserver = WrappedResizeObserver;
+    }
+  } catch (_) {}
+
+  window.__vcRedrawCanvasesForVectorZoom = function () {
+    try {
+      if (typeof window.__vcStepFrames === 'function') window.__vcStepFrames(2);
+      if (window.AC && typeof window.AC.drawAll === 'function') {
+        window.AC.drawAll();
+      }
+      for (const rec of trackedCanvasResizeObservers) {
+        let hasCanvas = false;
+        for (const el of rec.observed) {
+          if (!el || !el.isConnected) continue;
+          if (el.tagName === 'CANVAS' || (el.querySelector && el.querySelector('canvas'))) {
+            hasCanvas = true;
+            break;
+          }
+        }
+        if (hasCanvas && typeof rec.callback === 'function') {
+          try {
+            rec.callback([], rec.inst);
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+  };
+
   try {
     const origGetContext = HTMLCanvasElement.prototype.getContext;
     if (typeof origGetContext === 'function') {

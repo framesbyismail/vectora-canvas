@@ -517,11 +517,12 @@
     frameSizer.style.height = '';
 
     $('zoomLabel').textContent = `${Math.round(state.zoom * 100)}%`;
+    postToBridge('set_zoom', { zoom: state.zoom });
     updateMinimap();
   }
 
   function setZoomAtPoint(newZoom, anchorStageX, anchorStageY) {
-    const clamped = Math.min(4.0, Math.max(0.15, Math.round(newZoom * 1000) / 1000));
+    const clamped = Math.min(16.0, Math.max(0.15, Math.round(newZoom * 1000) / 1000));
     const prevZoom = state.zoom;
     if (Math.abs(clamped - prevZoom) < 0.0005) return;
 
@@ -1237,26 +1238,9 @@
 
     const cvs = $('vcCpSvCanvas');
     if (cvs) {
-      const ctx = cvs.getContext('2d');
-      if (ctx) {
-        const w = cvs.width || 216;
-        const h = cvs.height || 128;
-        ctx.clearRect(0, 0, w, h);
-        ctx.fillStyle = pureHex;
-        ctx.fillRect(0, 0, w, h);
-
-        const gradW = ctx.createLinearGradient(0, 0, w, 0);
-        gradW.addColorStop(0, 'rgba(255,255,255,1)');
-        gradW.addColorStop(1, 'rgba(255,255,255,0)');
-        ctx.fillStyle = gradW;
-        ctx.fillRect(0, 0, w, h);
-
-        const gradB = ctx.createLinearGradient(0, 0, 0, h);
-        gradB.addColorStop(0, 'rgba(0,0,0,0)');
-        gradB.addColorStop(1, 'rgba(0,0,0,1)');
-        ctx.fillStyle = gradB;
-        ctx.fillRect(0, 0, w, h);
-      }
+      cvs.style.backgroundColor = pureHex;
+      cvs.style.backgroundImage =
+        'linear-gradient(to top, #000000 0%, rgba(0, 0, 0, 0) 100%), linear-gradient(to right, #ffffff 0%, rgba(255, 255, 255, 0) 100%)';
     }
 
     const svThumb = $('vcCpSvThumb');
@@ -4253,6 +4237,7 @@
         postToBridge('init_sync', {
           mode: state.mode,
           tool: state.tool,
+          zoom: state.zoom,
           artboardWidth: state.artboardWidth,
           artboardHeight: state.artboardHeight,
           prefs: state.preferences,
