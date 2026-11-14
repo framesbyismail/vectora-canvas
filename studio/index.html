@@ -301,9 +301,12 @@
         <svg viewBox="0 0 20 20" width="15" height="15"><rect x="3" y="3.5" width="14" height="13" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-dasharray="2.5 2"/></svg>
         <span class="k-hint">M</span>
       </button>
-      <button type="button" class="ai-tool" data-tool="note" id="toolNote" title="Agent Note Tool (N) — Mark area &amp; write Coding Agent instructions">
+      <button type="button" class="ai-tool" data-tool="note" id="toolNote" title="Agent Note Tool (N) — Mark area or draw Arrow from reference image &amp; send visual PNG note to Coding Agent">
         <svg viewBox="0 0 20 20" width="15" height="15"><path d="M4 3.5h12a1.5 1.5 0 0 1 1.5 1.5v7.5a1.5 1.5 0 0 1-1.5 1.5H8.5L4.5 17v-3H4a1.5 1.5 0 0 1-1.5-1.5V5A1.5 1.5 0 0 1 4 3.5Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M6.5 7.5h7M6.5 10.5h4.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
         <span class="k-hint">N</span>
+      </button>
+      <button type="button" class="ai-tool ai-action-btn" id="btnDockAddImage" title="Import Reference Design Image (or Paste with Ctrl+V / Drag &amp; Drop)">
+        <svg viewBox="0 0 20 20" width="15" height="15"><rect x="2.8" y="3.8" width="14.4" height="12.4" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.45"/><circle cx="7.2" cy="8" r="1.4" fill="currentColor"/><path d="M3.5 14.4l4-3.8 3 2.8 2.6-2.4 3.4 3.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
       <button type="button" class="ai-tool" data-tool="hand" id="toolHand" title="Hand Tool (H, Middle-Click Drag, or Space+Drag)">
         <svg viewBox="0 0 20 20" width="15" height="15"><path d="M7.5 9.5V4.8a1 1 0 0 1 2 0V9m0 0V3.8a1 1 0 0 1 2 0V9m0 0V4.8a1 1 0 0 1 2 0v4.8m0 0V6.8a1 1 0 0 1 2 0v5.7a5 5 0 0 1-5 5H8.8a4.5 4.5 0 0 1-3.8-2.1l-1.8-2.9a1.1 1.1 0 0 1 1.8-1.2l1.5 1.5V9.5Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
@@ -359,6 +362,23 @@
             <button type="button" class="shape-opt" data-shape="pill" title="Capsule / Pill">Pill</button>
             <button type="button" class="shape-opt" data-shape="line" title="Vector Line">Line</button>
           </div>
+
+          <!-- Contextual Note Tool Sub-Bar: Area Box | Arrow | + Reference Image (shown when Note tool N is active) -->
+          <div class="shape-subbar note-subbar" id="noteSubbar" hidden>
+            <button type="button" class="note-mode-opt active" data-note-mode="box" title="Area Box Mode — Drag a box or click an element to mark a UI region">
+              <svg viewBox="0 0 14 14" width="11" height="11"><rect x="1.8" y="2.2" width="10.4" height="9.6" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-dasharray="2.2 1.6"/></svg>
+              <span>Area Box</span>
+            </button>
+            <button type="button" class="note-mode-opt" data-note-mode="arrow" id="btnNoteModeArrow" title="Arrow Note Mode — Drag an arrow from a pasted reference image (or any spot) directly onto the design">
+              <svg viewBox="0 0 14 14" width="11" height="11"><path d="M2.2 11.8L11.5 2.5M6.8 2.5h4.7v4.7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span>Arrow</span>
+            </button>
+            <button type="button" class="note-mode-opt note-img-trigger" id="btnNoteSubAddImg" title="Import or Paste (Ctrl+V) a Reference Design Image onto the workspace">
+              <svg viewBox="0 0 14 14" width="11" height="11"><rect x="1.6" y="2.4" width="10.8" height="9.2" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="4.8" cy="5.5" r="1" fill="currentColor"/><path d="M2.2 10.4l3-2.8 2.2 2 2-1.8 2.4 2.6" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span>+ Image</span>
+            </button>
+          </div>
+          <input type="file" id="refImgFileInput" accept="image/*" multiple hidden>
 
           <span class="sel-pill" id="selectionSummary">1920 × 1080 Artboard</span>
 
@@ -439,11 +459,27 @@
         <span class="iso-hint">Individual group items editable · Outside dimmed (Esc to exit)</span>
       </div>
 
-      <div class="canvas-scroll" id="canvasScroll">
-        <div class="frame-sizer" id="frameSizer">
-          <div class="frame-stage" id="frameStage">
-            <iframe id="previewFrame" title="Vectora Canvas Workspace" sandbox="allow-same-origin allow-scripts allow-forms allow-modals allow-popups allow-downloads"></iframe>
+      <div class="canvas-viewport-grid" id="canvasViewportGrid">
+        <button type="button" class="ruler-corner" id="rulerCorner" title="Figma Pixel Rulers &amp; Snap Guides · Drag from Top or Left ruler to place guides · Alt+Click corner to clear all guides">
+          <svg viewBox="0 0 12 12" width="10" height="10"><path d="M2 2h8M2 2v8M5 2v2.2M8 2v2.2M2 5h2.2M2 8h2.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+        </button>
+        <div class="ruler-top" id="rulerTop" title="Drag downward into the workspace to place a Horizontal Guide">
+          <canvas id="rulerTopCanvas"></canvas>
+        </div>
+        <div class="ruler-left" id="rulerLeft" title="Drag rightward into the workspace to place a Vertical Guide">
+          <canvas id="rulerLeftCanvas"></canvas>
+        </div>
+
+        <div class="canvas-scroll" id="canvasScroll">
+          <div class="frame-sizer" id="frameSizer">
+            <div class="frame-stage" id="frameStage">
+              <iframe id="previewFrame" title="Vectora Canvas Workspace" sandbox="allow-same-origin allow-scripts allow-forms allow-modals allow-popups allow-downloads"></iframe>
+            </div>
+            <div class="ref-image-stage" id="refImageStage"></div>
+            <svg class="workspace-annot-svg" id="workspaceAnnotSvg" aria-hidden="true"></svg>
           </div>
+          <div class="user-guides-layer" id="userGuidesLayer"></div>
+          <div class="note-arrow-capture" id="noteArrowCapture" hidden></div>
         </div>
       </div>
 
@@ -453,24 +489,42 @@
         <div class="mm-viewport" id="mmViewport"></div>
       </div>
 
-      <!-- FLOATING NOTE POPUP (Non-design instruction for Coding Agent) -->
+      <!-- FLOATING NOTE POPUP (Non-design instruction for Coding Agent — saved & sent as PNG image + metadata) -->
       <div class="note-popup" id="notePopup" hidden role="dialog" aria-label="Coding Agent Note">
         <div class="np-head">
           <span class="np-title">
             <svg viewBox="0 0 16 16" width="13" height="13"><path d="M3 2.8h10a1.2 1.2 0 0 1 1.2 1.2v6.2a1.2 1.2 0 0 1-1.2 1.2H6.8L3.6 14v-2.6H3a1.2 1.2 0 0 1-1.2-1.2V4A1.2 1.2 0 0 1 3 2.8Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
             <span id="notePopupTitle">Agent Note</span>
           </span>
-          <span class="np-badge">Outside HTML</span>
+          <span class="np-badge">Sent as PNG Image</span>
         </div>
         <div class="np-target" id="notePopupTarget">Target: Marked Region</div>
         <div class="np-coords" id="notePopupCoords">Marked Area: —</div>
+        <div class="np-tools-row" id="notePopupToolsRow">
+          <button type="button" class="mini-btn accent" id="btnNoteDrawArrow" title="Draw a directional arrow from a reference image (or any point) onto the design">
+            <svg viewBox="0 0 14 14" width="11" height="11"><path d="M2.2 11.8L11.5 2.5M6.8 2.5h4.7v4.7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>+ Draw Arrow</span>
+          </button>
+          <button type="button" class="mini-btn" id="btnNotePopupAddImg" title="Import or Paste (Ctrl+V) a reference image">
+            <svg viewBox="0 0 14 14" width="11" height="11"><rect x="1.6" y="2.4" width="10.8" height="9.2" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="4.8" cy="5.5" r="1" fill="currentColor"/><path d="M2.2 10.4l3-2.8 2.2 2 2-1.8 2.4 2.6" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>+ Image</span>
+          </button>
+          <button type="button" class="mini-btn" id="btnNoteClearArrows" hidden title="Remove arrows from this note">Clear Arrows</button>
+        </div>
+        <div class="np-img-preview-wrap" id="notePopupImgPreviewWrap" hidden>
+          <div class="np-img-preview-bar">
+            <span id="notePopupImgMeta">Visual Note Snapshot (Design + Ref Image + Arrow)</span>
+            <button type="button" class="mini-btn" id="btnDownloadNotePng" title="Download this visual note as a PNG image">PNG</button>
+          </div>
+          <img id="notePopupImgPreview" class="np-img-preview" alt="Visual Note Snapshot">
+        </div>
         <div class="np-types" id="noteTypeGroup">
           <button type="button" class="np-type active" data-ntype="fix">Fix</button>
           <button type="button" class="np-type" data-ntype="change">Change</button>
           <button type="button" class="np-type" data-ntype="add">Add</button>
           <button type="button" class="np-type" data-ntype="remove">Remove</button>
         </div>
-        <textarea id="notePopupInput" class="prop-textarea np-textarea" rows="3" placeholder="Describe what the coding agent should fix, change, or add inside this marked area…"></textarea>
+        <textarea id="notePopupInput" class="prop-textarea np-textarea" rows="3" placeholder="Describe what the coding agent should fix, change, or match from the arrow/image…"></textarea>
         <div class="np-foot">
           <div class="inline-actions">
             <button type="button" class="mini-btn danger" id="btnDeleteNote" hidden>Delete</button>

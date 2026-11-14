@@ -15,7 +15,7 @@ description: Opens Vectora Canvas — an Adobe Illustrator, Figma & Airship-insp
 ## 1. Trigger & Mandatory Pre-Open Rule Execution
 
 1. **Instant Trigger on `"Vectora"`**: Whenever the user types just **`Vectora`** (or **`Vectora Canvas`**, *"open X in Vectora"*, *"show live preview in Vectora"*), activate this skill immediately.
-2. **Mandatory Pre-Open Rule Enforcement (All Designs)**: Before opening any existing or newly created HTML/CSS/JS project in Vectora Canvas, **always audit and apply Section 2's Vectora Authoring Rules first** (especially Standalone Tight Text, Invisible-Over-Visible Div `8px` Inset, `[data-name]`/`id` labels, `:root` `--primary`/`--secondary`, and Links attributes) while preserving **100% exact visual appearance (`0` pixel change) and 100% runtime functionality**.
+2. **Mandatory Pre-Open Rule Enforcement (All Designs)**: Before opening any existing or newly created HTML/CSS/JS project in Vectora Canvas, **always audit and apply Section 2's Vectora Authoring Rules first** (especially Standalone Tight Text, Universal Editable Sections & Sub-Sections, Invisible-Over-Visible Div `8px` Inset, `[data-name]`/`id`/`[data-vc-section]` labels, `:root` `--primary`/`--secondary`, clean pixel alignments, and Links attributes) while preserving **100% exact visual appearance (`0` pixel change) and 100% runtime functionality**.
 3. **Live Preview on Request**: Launch or switch the Vectora Canvas server on port `4680` to the target project folder and open `http://127.0.0.1:4680/` in the browser / side browser pane.
 4. **Antigravity Sidecar Pill**: When running inside Google Antigravity with the Vectora Canvas sidecar installed, include `[Vectora Canvas](sidecar://vectora-canvas/)` alongside `http://127.0.0.1:4680/`.
 
@@ -28,21 +28,23 @@ Whenever generating, editing, or opening **any** design in **Vectora Canvas**, A
 1. **Standalone Tight Text Rule — Zero Text Trapped Inside Invisible Boxes (Critical for All Designs)**:
    - Every visible text piece must be wrapped in its own standalone semantic text element (`<span>`, `<label>`, `<h1>`–`<h6>`, `<p>`, `<small>`, `<b>`, `<strong>`, `<output>`) with tight glyph-fitting bounds (`width: fit-content` on `<label>`/headings inside `flex-direction: column` containers — never stretched `100%`-wide invisible text boxes).
    - **Never** leave bare unwrapped `TextNode`s mixed alongside sibling `<svg>`, `<button>`, `<input>`, `<select>`, `<a>`, or `<small>` elements inside a wrapper or button; wrap the text in a standalone `<span>` so every text and icon selects cleanly on its own and inside **Double-Click Isolation Mode**.
-2. **Invisible-Over-Visible Div Inset Rule (Critical)**:
+2. **Universal Editable Section & Sub-Section Rule (Critical for All Web Designs)**:
+   - Every logical section AND sub-section of a web design (cards, prompt/chip containers like `Key Prompts`, focus/subject split panes like `Select Focus Point` / `Select Focus Subject`, slider rows, segmented control rows, form `.field`s, button bars) **must** be wrapped in its own clean container with `id`, `data-name`, and `data-vc-section` so every section and sub-section can be selected, moved, enlarged, and shrunk directly on the Vectora Canvas artboard like a native Figma/Illustrator design file.
+3. **Invisible-Over-Visible Div Inset Rule (Critical)**:
    - **Never** size a transparent or invisible `<div>` (overlay, hit-zone, click-catcher, or wrapper) to the exact `100% × 100%` (`inset: 0`) bounds of a visible `<div>` / `.card` / `<section>` directly underneath it.
    - **Always inset the overlapping invisible `<div>` by `8px`–`12px`** (`inset: 8px;` or `width: calc(100% - 16px); height: calc(100% - 16px);`) so it is slightly smaller than the visible `<div>`.
    - This preserves an `8px` outer rim around the visible `<div>` so both the visible container and the invisible `<div>` can be clicked, marquee-selected, and dragged independently (and once selected, a hollow invisible `<div>` can also be dragged from anywhere inside its empty middle!).
-2. **Zero Full-Bleed Pointer Blockers**:
+4. **Zero Full-Bleed Pointer Blockers**:
    - Closed modals, backdrops, and overlays must use `hidden`, `display: none`, or `pointer-events: none` — never leave an invisible `position: fixed; inset: 0; pointer-events: auto` layer blocking canvas clicks.
-3. **Semantic IDs & Layer Names**:
-   - Add descriptive `id` or `data-name` attributes on sections, cards, `<div>`s, and buttons so they appear cleanly in **Layers** (which auto-scrolls and highlights the active selection), **Sessions**, **DOM**, and **Links**.
-4. **Links Tab Compatibility**:
+5. **Semantic IDs & Layer Names**:
+   - Add descriptive `id`, `data-name`, and `data-vc-section` attributes on sections, sub-sections, cards, `<div>`s, and buttons so they appear cleanly in **Layers** (which auto-scrolls and highlights the active selection), **Sessions**, **DOM**, and **Links**.
+6. **Links Tab Compatibility**:
    - Put navigable destinations on `<a href="page.html">`, `<button data-vc-link="page.html">`, or `data-href="#section"` using relative paths so the **`Links` Inspector Tab** lists every button/page link as an editable card and works in both server mode and `blob:` VFS local-folder mode.
-5. **Flex/Grid Flow & Theme Variables**:
-   - Prefer `display: flex` / `display: grid` with `gap` so Flow Divs (`D`) automatically claim space and close horizontal/vertical gaps on delete; expose `:root` `--primary` and `--secondary` CSS variables for live palette editing.
-6. **Marked Region Notes & Sync Blocks (`agent-notes.json`)**:
-   - Check `H:/AntyGravety/Vectora Canvas/memory/agent-notes.json` (or `GET http://127.0.0.1:4680/__vc_api/notes` / `.vectora-notes.json`) for pinned user tasks — each note supplies `latestAgentBrief`, exact `markRect` (`x, y, w, h`), `sectionLabel`, primary `selector`, all `enclosedElements` inside the marked box, `htmlSnippet`, and the user's `text` instruction. Preserve `/* === VECTORA CANVAS SYNC === */` blocks.
-7. **100% Pure Vector Authoring (Never Pixelated)**:
+7. **Flex/Grid Flow, Clean Alignment & Theme Variables**:
+   - Prefer `display: flex` / `display: grid` with `gap` so Flow Divs (`D`) automatically claim space and close horizontal/vertical gaps on delete; align multi-column top/bottom/side edges and text baselines cleanly against Vectora's Figma Pixel Rulers & Snap Guides; expose `:root` `--primary` and `--secondary` CSS variables for live palette editing.
+8. **Visual PNG Notes, Reference Image Arrows & Sync Blocks (`agent-notes.json` + `noteImagePath`)**:
+   - Check `H:/AntyGravety/Vectora Canvas/memory/agent-notes.json` (or `GET http://127.0.0.1:4680/__vc_api/notes` / `.vectora-notes.json`) for pinned user tasks — each note supplies `noteImagePath` (a composite PNG saved in `memory/note-images/<workspaceId>/note_<number>_<id>.png` showing the live UI region + pasted reference design image(s) + directional orange vector arrow(s) + callout banner), `arrows`, `referenceImages`, `latestAgentBrief`, `markRect` (`x, y, w, h`), `sectionLabel`, `selector`, `enclosedElements`, `htmlSnippet`, and `text`. **Always inspect `noteImagePath` with `read_file`** alongside the JSON metadata. Preserve `/* === VECTORA CANVAS SYNC === */` blocks.
+9. **100% Pure Vector Authoring (Never Pixelated)**:
    - Use pure SVG icons, CSS gradients/borders, and `devicePixelRatio`-aware `<canvas>` sizing (avoiding low-DPI raster icons or `will-change: transform` bitmap layer caching) so every element stays razor-sharp up to `1600%` zoom.
 
 ---
@@ -83,7 +85,14 @@ curl -X POST http://127.0.0.1:4680/__vc_api/switch-target \
   - Full client-side VFS runtime resolves dynamic `<script src="...">` injection, relative `fetch()`, `#hash` scrolling, and multi-page button/link navigation when opening local folders in the web app.
 - **One-Folder Recent Projects & Fixed-Width Page Selector**: `Open Recent Project` deduplicates strictly to one entry per project folder; topbar page selector (`#ddPage`) keeps a fixed `128px` width; `Layers` highlights and auto-scrolls to any canvas selection.
 - **GPU-First Acceleration with Automatic CPU Fallback**: Automatically probes WebGL2/WebGL1 hardware vs software/unavailable GPU, runs 3D `translate3d` compositor acceleration when GPU is healthy, and falls back seamlessly to lightweight 2D CPU rendering (`#accelModeBadge` + Preferences `Auto / GPU / CPU`).
-- **Persistent Marked-Area Note Tool (`N`) + Full Coding Agent Handoff**: Dragging with the Note tool draws a persistent Warm Orange region rectangle (`__vc_note_box__`) that stays visible both while writing the note (`is-pending`) and after saving alongside its numbered pin (`__vc_note_pin__`), syncing `markRect`, `sectionLabel`, `selector`, `enclosedElements`, `htmlSnippet`, and `text` directly to `memory/agent-notes.json`, `/__vc_api/notes`, 1-click `Copy Prompt`, and `.vectora-notes.json` in `.zip` exports.
+- **Persistent Marked-Area, Reference Image Import (`Ctrl+V` / `+ Image`) & Arrow Visual PNG Note Tool (`N`)**:
+  - Paste (`Ctrl+V`), drag-and-drop, or upload (`+ Image`) reference design images directly onto the Vectora workspace (`#refImageStage`: movable, 4-corner resizable, opacity toggle, deletable).
+  - Switch Note Tool (`N`) between **`Area Box`** and **`Arrow`** (or click **`+ Draw Arrow`** inside `#notePopup`) to draw crisp vector arrows from a pasted reference image directly onto a target element/spot on the artboard.
+  - Every saved Note automatically renders and saves a **composite PNG image** (`memory/note-images/<workspaceId>/note_<number>_<id>.png` + `.vectora-notes/note_<number>.png` in `.zip` exports) showing the live UI + reference image(s) + orange arrow(s) + callout note, and exposes `noteImagePath`, `arrows`, and `referenceImages` in `memory/agent-notes.json` for Coding Agents.
+- **Figma-Style Pixel Rulers & Draggable Magnetic Snap Guides**:
+  - Crisp `devicePixelRatio` Top (`20px`) & Left (`20px`) pixel rulers synced with zoom, pan, active selection highlight, and live cursor coordinates.
+  - Drag from the Top ruler to create Horizontal (`Y`) guides or from the Left ruler to create Vertical (`X`) guides (with live `X`/`Y` coordinate badges, magnetic snap during both element move AND resize, drag to reposition, double-click / drag-to-ruler / `Delete` to remove, persistent per workspace).
+- **Universal Section & Sub-Section Editing**: Every card, `.field`, `.chips`, `.sl`, `.seg`, `.fdetail`, `.fmulti`, `[data-name]`, and `[data-vc-section]` sub-section is directly selectable, movable, and resizable (both larger and smaller) with authoritative flex/min/max overrides.
 - **Adobe Illustrator Live Corner Widgets, Web Effects Panel (`fx`) & Pure Mathematical Vector Rendering**:
   - Selecting any shape, `<div>`, or card renders 4 circular Live Corner handles (`tl`, `tr`, `br`, `bl`) and activates `#cornerControlBar` (`Corners:` scrub handle, slider, `px` readout, and `%` roundness badge).
   - Right beside `Corners:`, `#effectsControlBar` (`fx Effects`) opens `#vcEffectsPopover` with **Drop Shadow**, **Outer Glow**, **Inner Glow**, **Inner Shadow**, **Layer Blur (Gaussian)**, **Backdrop Frosted Glass Blur**, **Text Shadow / Glow**, **CSS Blend Modes & Filter Adjustments**, 1-click presets, custom `#vcColorPopover` swatches, Undo/Redo, and Direct CSS Sync.

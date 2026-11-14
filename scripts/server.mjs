@@ -70,8 +70,23 @@ function parseArgs(argv) {
 
 const args = parseArgs(process.argv);
 
+const NOTE_IMAGES_DIR = path.join(MEMORY_DIR, 'note-images');
 fs.mkdirSync(MEMORY_DIR, { recursive: true });
 fs.mkdirSync(BACKUP_ROOT, { recursive: true });
+fs.mkdirSync(NOTE_IMAGES_DIR, { recursive: true });
+
+function saveDataUrlToFile(dataUrl, destPath) {
+  if (!dataUrl || typeof dataUrl !== 'string') return false;
+  const m = dataUrl.match(/^data:image\/([a-zA-Z0-9+.-]+);base64,([\s\S]+)$/);
+  if (!m) return false;
+  try {
+    fs.mkdirSync(path.dirname(destPath), { recursive: true });
+    fs.writeFileSync(destPath, Buffer.from(m[2], 'base64'));
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
 
 function defaultPreferences() {
   return {
@@ -142,10 +157,78 @@ function getWorkspaceNotes(wsId) {
   return Array.isArray(store.workspaces?.[wsId]) ? store.workspaces[wsId] : [];
 }
 
+function getWorkspaceRefImages(wsId) {
+  const store = loadAgentNotesStore();
+  return Array.isArray(store.refImages?.[wsId]) ? store.refImages[wsId] : [];
+}
+
+function mutateWorkspaceRefImages(wsId, payload) {
+  const store = loadAgentNotesStore();
+  store.refImages = store.refImages || {};
+  let list = Array.isArray(store.refImages[wsId]) ? store.refImages[wsId] : [];
+  const action = payload.action || 'upsert';
+  const wsImgDir = path.join(NOTE_IMAGES_DIR, wsId);
+
+  if (action === 'clear') {
+    for (const item of list) {
+      if (item.imagePath && fs.existsSync(item.imagePath)) {
+        try { fs.unlinkSync(item.imagePath); } catch (_) {}
+      }
+    }
+    list = [];
+  } else if (action === 'delete' && payload.id) {
+    const victim = list.find((r) => r.id === payload.id);
+    if (victim?.imagePath && fs.existsSync(victim.imagePath)) {
+      try { fs.unlinkSync(victim.imagePath); } catch (_) {}
+    }
+    list = list.filter((r) => r.id !== payload.id);
+  } else if (action === 'upsert' && payload.refImage) {
+    const incoming = payload.refImage;
+    const id = String(incoming.id || `ref_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`).replace(/[^a-zA-Z0-9_-]/g, '');
+    const idx = list.findIndex((r) => r.id === id);
+    const prev = idx >= 0 ? list[idx] : {};
+    let imagePath = prev.imagePath || '';
+    let imageUrl = prev.imageUrl || '';
+    if (incoming.dataUrl && String(incoming.dataUrl).startsWith('data:image/')) {
+      const extMatch = String(incoming.dataUrl).match(/^data:image\/([a-z0-9]+)/i);
+      const ext = extMatch ? (extMatch[1].toLowerCase() === 'jpeg' ? 'jpg' : extMatch[1].toLowerCase()) : 'png';
+      const fileName = `${id}.${ext}`;
+      const fullPath = path.join(wsImgDir, fileName);
+      if (saveDataUrlToFile(incoming.dataUrl, fullPath)) {
+        imagePath = fullPath.replace(/\\/g, '/');
+        imageUrl = `/__vc_api/note-image/${encodeURIComponent(wsId)}/${encodeURIComponent(fileName)}`;
+      }
+    } else if (incoming.imageUrl) {
+      imageUrl = String(incoming.imageUrl);
+      imagePath = String(incoming.imagePath || prev.imagePath || '');
+    }
+    const rec = {
+      id,
+      name: String(incoming.name ?? prev.name ?? 'Reference Image'),
+      x: Math.round(Number(incoming.x ?? prev.x ?? -380)),
+      y: Math.round(Number(incoming.y ?? prev.y ?? 80)),
+      w: Math.max(24, Math.round(Number(incoming.w ?? prev.w ?? 320))),
+      h: Math.max(24, Math.round(Number(incoming.h ?? prev.h ?? 220))),
+      naturalW: Number(incoming.naturalW ?? prev.naturalW ?? 320),
+      naturalH: Number(incoming.naturalH ?? prev.naturalH ?? 220),
+      opacity: incoming.opacity !== undefined ? Number(incoming.opacity) : (prev.opacity ?? 1),
+      imagePath,
+      imageUrl,
+      updatedAt: new Date().toISOString()
+    };
+    if (idx >= 0) list[idx] = rec;
+    else list.push(rec);
+  }
+
+  store.refImages[wsId] = list;
+  saveAgentNotesStore(store);
+  return list;
+}
+
 function buildAgentNotesBrief(wsId, targetDir, notes) {
   if (!Array.isArray(notes) || !notes.length) return '';
   const lines = [
-    `# Vectora Canvas — Marked UI Notes for Coding Agent`,
+    `# Vectora Canvas — Marked UI Notes & Visual Image Callouts for Coding Agent`,
     `Target Project: ${targetDir || wsId}`,
     ``
   ];
@@ -155,7 +238,22 @@ function buildAgentNotesBrief(wsId, targetDir, notes) {
       ? `x: ${mr.x}px, y: ${mr.y}px, width: ${mr.w}px, height: ${mr.h}px (Artboard ${mr.artboardW || 1920}x${mr.artboardH || 1080})`
       : 'Full element / page';
     lines.push(`## Note #${n.number} [${String(n.taskType || 'fix').toUpperCase()}] — Page: ${n.entry || 'index.html'}`);
+    if (n.noteImagePath) {
+      lines.push(`- Visual Note Image (MUST inspect visually via read_file): \`${n.noteImagePath}\``);
+    }
     lines.push(`- Marked Area: ${areaTxt}`);
+    if (Array.isArray(n.arrows) && n.arrows.length > 0) {
+      const arrDesc = n.arrows
+        .map((a, i) => `#${i + 1}: (${Math.round(a.x1)}, ${Math.round(a.y1)}) -> (${Math.round(a.x2)}, ${Math.round(a.y2)})${a.sourceRefImageId ? ` [from ${a.sourceRefImageId}]` : ''}`)
+        .join('; ');
+      lines.push(`- Vector Arrows: ${arrDesc}`);
+    }
+    if (Array.isArray(n.referenceImages) && n.referenceImages.length > 0) {
+      const refDesc = n.referenceImages
+        .map((r) => `${r.name || r.id}${r.imagePath ? ` (\`${r.imagePath}\`)` : ''} at (${r.x}, ${r.y}, ${r.w}x${r.h})`)
+        .join('; ');
+      lines.push(`- Attached Reference Design Image(s): ${refDesc}`);
+    }
     if (n.sectionLabel) lines.push(`- Section: ${n.sectionLabel}`);
     if (n.selector) lines.push(`- Primary Selector: \`${n.selector}\` (${n.elementTag || 'element'})`);
     if (Array.isArray(n.enclosedElements) && n.enclosedElements.length > 0) {
@@ -165,7 +263,7 @@ function buildAgentNotesBrief(wsId, targetDir, notes) {
       lines.push(`- Elements Inside Marked Area: ${encSummary}`);
     }
     if (n.htmlSnippet) lines.push(`- HTML Context: \`${n.htmlSnippet}\``);
-    lines.push(`- User Note / Instruction: ${n.text}`);
+    lines.push(`- User Note / Instruction: ${n.text || '(See Visual Note Image & Arrow callout)'}`);
     lines.push(``);
   }
   return lines.join('\n');
@@ -177,18 +275,77 @@ function mutateWorkspaceNotes(wsId, payload) {
   let list = Array.isArray(store.workspaces[wsId]) ? store.workspaces[wsId] : [];
   const action = payload.action || 'upsert';
   const curTarget = originalSourceDir || resolvedTargetDir || args.target || '';
+  const wsImgDir = path.join(NOTE_IMAGES_DIR, wsId);
 
   if (action === 'clear') {
+    for (const n of list) {
+      if (n.noteImagePath && fs.existsSync(n.noteImagePath)) {
+        try { fs.unlinkSync(n.noteImagePath); } catch (_) {}
+      }
+    }
     list = [];
   } else if (action === 'delete' && payload.id) {
+    const victim = list.find((n) => n.id === payload.id);
+    if (victim?.noteImagePath && fs.existsSync(victim.noteImagePath)) {
+      try { fs.unlinkSync(victim.noteImagePath); } catch (_) {}
+    }
     list = list.filter((n) => n.id !== payload.id);
   } else if (action === 'upsert' && payload.note) {
     const incoming = payload.note;
     const now = new Date().toISOString();
-    const id = incoming.id || `note_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const id = String(incoming.id || `note_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`).replace(/[^a-zA-Z0-9_-]/g, '');
     const idx = list.findIndex((n) => n.id === id);
     const prev = idx >= 0 ? list[idx] : {};
     const nextNumber = idx >= 0 ? prev.number : (list.reduce((m, x) => Math.max(m, Number(x.number) || 0), 0) + 1);
+
+    let noteImagePath = prev.noteImagePath || '';
+    let noteImageUrl = prev.noteImageUrl || '';
+    if (incoming.noteImageDataUrl && String(incoming.noteImageDataUrl).startsWith('data:image/')) {
+      const fileName = `note_${nextNumber}_${id}.png`;
+      const fullPath = path.join(wsImgDir, fileName);
+      if (saveDataUrlToFile(incoming.noteImageDataUrl, fullPath)) {
+        noteImagePath = fullPath.replace(/\\/g, '/');
+        noteImageUrl = `/__vc_api/note-image/${encodeURIComponent(wsId)}/${encodeURIComponent(fileName)}?t=${Date.now()}`;
+      }
+    }
+
+    const rawRefs = Array.isArray(incoming.referenceImages)
+      ? incoming.referenceImages
+      : (Array.isArray(prev.referenceImages) ? prev.referenceImages : []);
+    const cleanRefs = rawRefs.map((r, rIdx) => {
+      const rid = String(r.id || `ref_${id}_${rIdx}`).replace(/[^a-zA-Z0-9_-]/g, '');
+      let rPath = r.imagePath || '';
+      let rUrl = r.imageUrl || '';
+      if (r.dataUrl && String(r.dataUrl).startsWith('data:image/')) {
+        const rFile = `${rid}.png`;
+        const rFull = path.join(wsImgDir, rFile);
+        if (saveDataUrlToFile(r.dataUrl, rFull)) {
+          rPath = rFull.replace(/\\/g, '/');
+          rUrl = `/__vc_api/note-image/${encodeURIComponent(wsId)}/${encodeURIComponent(rFile)}`;
+        }
+      }
+      return {
+        id: rid,
+        name: String(r.name || 'Reference Image'),
+        x: Math.round(Number(r.x) || 0),
+        y: Math.round(Number(r.y) || 0),
+        w: Math.round(Number(r.w) || 0),
+        h: Math.round(Number(r.h) || 0),
+        imagePath: rPath,
+        imageUrl: rUrl
+      };
+    });
+
+    const arrows = Array.isArray(incoming.arrows)
+      ? incoming.arrows.map((a) => ({
+          x1: Math.round(Number(a.x1) || 0),
+          y1: Math.round(Number(a.y1) || 0),
+          x2: Math.round(Number(a.x2) || 0),
+          y2: Math.round(Number(a.y2) || 0),
+          sourceRefImageId: String(a.sourceRefImageId || '')
+        }))
+      : (Array.isArray(prev.arrows) ? prev.arrows : []);
+
     const record = {
       id,
       number: nextNumber,
@@ -197,10 +354,15 @@ function mutateWorkspaceNotes(wsId, payload) {
       viewContext: incoming.viewContext ?? prev.viewContext ?? '',
       status: incoming.status || prev.status || 'open',
       taskType: incoming.taskType || prev.taskType || 'fix',
+      noteMode: incoming.noteMode || (arrows.length ? 'arrow' : (prev.noteMode || 'box')),
       selector: incoming.selector ?? prev.selector ?? '',
       elementTag: incoming.elementTag ?? prev.elementTag ?? '',
       sectionLabel: incoming.sectionLabel ?? prev.sectionLabel ?? '',
       markRect: incoming.markRect !== undefined ? incoming.markRect : (prev.markRect || null),
+      arrows,
+      referenceImages: cleanRefs,
+      noteImagePath,
+      noteImageUrl,
       enclosedElements: Array.isArray(incoming.enclosedElements)
         ? incoming.enclosedElements
         : (Array.isArray(prev.enclosedElements) ? prev.enclosedElements : []),
@@ -1128,6 +1290,7 @@ const server = http.createServer(async (req, res) => {
         preferences: mem.preferences || defaultPreferences(),
         ignoredWords: mem.ignoredWords || [],
         notes: getWorkspaceNotes(workspaceId),
+        refImages: getWorkspaceRefImages(workspaceId),
         savedState: (mem.workspaceStates && mem.workspaceStates[workspaceId]) || null
       });
       return;
@@ -1182,17 +1345,56 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    if (pathname.startsWith('/__vc_api/note-image/') && req.method === 'GET') {
+      const parts = pathname.slice('/__vc_api/note-image/'.length).split('/');
+      if (parts.length === 2) {
+        const safeWs = decodeURIComponent(parts[0]).replace(/[^a-zA-Z0-9_-]/g, '');
+        const safeFile = path.basename(decodeURIComponent(parts[1]));
+        const fullImg = path.join(NOTE_IMAGES_DIR, safeWs, safeFile);
+        if (fs.existsSync(fullImg) && fs.statSync(fullImg).isFile()) {
+          const ext = path.extname(safeFile).toLowerCase();
+          res.writeHead(200, {
+            'Content-Type': MIME_TYPES[ext] || 'image/png',
+            'Cache-Control': 'no-cache, no-store',
+            'Access-Control-Allow-Origin': '*'
+          });
+          fs.createReadStream(fullImg).pipe(res);
+          return;
+        }
+      }
+      res.writeHead(404);
+      res.end('Not Found');
+      return;
+    }
+
+    if (pathname === '/__vc_api/ref-images') {
+      if (req.method === 'GET') {
+        sendJson(res, 200, { ok: true, workspaceId, refImages: getWorkspaceRefImages(workspaceId) });
+        return;
+      }
+      if (req.method === 'POST') {
+        const body = await readJsonBody(req);
+        const refImages = mutateWorkspaceRefImages(workspaceId, body);
+        broadcastSse('ref_images_updated', { workspaceId, refImages });
+        sendJson(res, 200, { ok: true, workspaceId, refImages });
+        return;
+      }
+    }
+
     if (pathname === '/__vc_api/notes') {
       if (req.method === 'GET') {
         const notes = getWorkspaceNotes(workspaceId);
+        const refImages = getWorkspaceRefImages(workspaceId);
         const curTarget = originalSourceDir || resolvedTargetDir || args.target || '';
         sendJson(res, 200, {
           ok: true,
           notesPath: NOTES_FILE,
+          noteImagesDir: path.join(NOTE_IMAGES_DIR, workspaceId).replace(/\\/g, '/'),
           notPartOfDesign: true,
           workspaceId,
           targetProject: curTarget,
           agentBrief: buildAgentNotesBrief(workspaceId, curTarget, notes),
+          refImages,
           notes
         });
         return;
@@ -1200,10 +1402,11 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST') {
         const body = await readJsonBody(req);
         const notes = mutateWorkspaceNotes(workspaceId, body);
+        const refImages = getWorkspaceRefImages(workspaceId);
         const curTarget = originalSourceDir || resolvedTargetDir || args.target || '';
         const agentBrief = buildAgentNotesBrief(workspaceId, curTarget, notes);
-        broadcastSse('notes_updated', { workspaceId, targetProject: curTarget, agentBrief, notes });
-        sendJson(res, 200, { ok: true, notesPath: NOTES_FILE, targetProject: curTarget, agentBrief, notes });
+        broadcastSse('notes_updated', { workspaceId, targetProject: curTarget, agentBrief, refImages, notes });
+        sendJson(res, 200, { ok: true, notesPath: NOTES_FILE, targetProject: curTarget, agentBrief, refImages, notes });
         return;
       }
     }

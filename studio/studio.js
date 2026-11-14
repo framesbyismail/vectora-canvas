@@ -154,6 +154,14 @@
     notes: [],
     editingNote: null,
     noteTaskType: 'fix',
+    noteMode: 'box', // 'box' | 'arrow'
+    addingArrowToEditingNote: false,
+    draftArrow: null, // { x1, y1, x2, y2 } in artboard coords
+    refImages: [], // [{ id, name, dataUrl, x, y, w, h, naturalW, naturalH, opacity }]
+    selectedRefImageId: null,
+    userGuides: [], // [{ id, axis: 'h'|'v', pos: number }] in artboard coords
+    selectedGuideId: null,
+    rulerCursor: null, // { artX, artY }
     sessions: [],
     layers: [],
     domTree: [],
@@ -188,6 +196,7 @@
   const frameStage = $('frameStage');
 
   let pendingSaveResolvers = new Map();
+  let pendingNotePointResolvers = new Map();
   let autoSaveTimer = null;
   let autoCodeSyncTimer = null;
   let activePreviewBlobUrl = null;
@@ -198,6 +207,8 @@
   const LS_RECENT_SESSIONS = 'vc_recent_sessions_v1';
   const LS_STANDALONE_NOTES = 'vc_standalone_notes_v1';
   const LS_STANDALONE_PREFS = 'vc_standalone_prefs_v1';
+  const LS_USER_GUIDES_PREFIX = 'vc_user_guides_v1::';
+  const LS_STANDALONE_REF_IMGS = 'vc_standalone_ref_imgs_v1';
 
   function showToast(msgText, durationMs = 2000) {
     const t = $('vcToast');
@@ -507,10 +518,13 @@
 
     const px = Math.round(state.panX * 100) / 100;
     const py = Math.round(state.panY * 100) / 100;
-    if (state.effectiveAccel === 'cpu') {
-      frameStage.style.transform = `translate(${Math.round(px)}px, ${Math.round(py)}px) scale(${state.zoom})`;
-    } else {
-      frameStage.style.transform = `translate3d(${px}px, ${py}px, 0) scale(${state.zoom})`;
+    const stageTf = state.effectiveAccel === 'cpu'
+      ? `translate(${Math.round(px)}px, ${Math.round(py)}px) scale(${state.zoom})`
+      : `translate3d(${px}px, ${py}px, 0) scale(${state.zoom})`;
+    frameStage.style.transform = stageTf;
+    if ($('refImageStage')) {
+      $('refImageStage').style.transform = stageTf;
+      syncRefImageGizmoScale();
     }
 
     // Never assign fixed pixel sizes to frameSizer — keeps workspace box fixed with zero side empty space pull!
@@ -520,6 +534,9 @@
     $('zoomLabel').textContent = `${Math.round(state.zoom * 100)}%`;
     postToBridge('set_zoom', { zoom: state.zoom });
     updateMinimap();
+    renderRulers();
+    renderUserGuidesUI();
+    renderWorkspaceAnnotSvg();
   }
 
   function setZoomAtPoint(newZoom, anchorStageX, anchorStageY) {
@@ -605,7 +622,12 @@
   function wireMinimapAndOuterCanvasPanZoom() {
     window.addEventListener('resize', () => {
       if (!state.hasManualViewport) fitArtboardToStage();
-      else updateMinimap();
+      else {
+        updateMinimap();
+        renderRulers();
+        renderUserGuidesUI();
+        renderWorkspaceAnnotSvg();
+      }
     });
 
     // Outer canvas wheel zoom (Ctrl+Scroll, Meta+Scroll, or Space+Ctrl+Scroll) — strictly inside workspace!
@@ -630,6 +652,7 @@
     });
     canvasScroll.addEventListener('mousedown', (ev) => {
       if (ev.target && ev.target.closest && ev.target.closest('#canvasMinimap')) return;
+      if (ev.target && ev.target.closest && (ev.target.closest('.vc-ref-image') || ev.target.closest('.vc-user-guide') || ev.target.closest('#noteArrowCapture'))) return;
       if (ev.button === 1 || state.spaceHeld || state.tool === 'hand') {
         ev.preventDefault();
         startCanvasPan(ev.clientX, ev.clientY);
@@ -644,10 +667,27 @@
         hideContextMenu();
         closeCustomColorPopover();
         closeEffectsPopover();
+        if (state.selectedRefImageId) {
+          state.selectedRefImageId = null;
+          renderRefImagesUI();
+        }
+        if (state.selectedGuideId) {
+          state.selectedGuideId = null;
+          renderUserGuidesUI();
+        }
         if (!ev.shiftKey) {
           postToBridge('clear_selection');
         }
       }
+    });
+    canvasScroll.addEventListener('mousemove', (ev) => {
+      if (state.mode !== 'edit' || !state.smartGuides) return;
+      const r = canvasScroll.getBoundingClientRect();
+      state.rulerCursor = {
+        artX: Math.round(((ev.clientX - r.left) - state.panX) / Math.max(0.05, state.zoom)),
+        artY: Math.round(((ev.clientY - r.top) - state.panY) / Math.max(0.05, state.zoom))
+      };
+      renderRulers();
     });
     canvasScroll.addEventListener('dblclick', (ev) => {
       if (ev.target && ev.target.closest && ev.target.closest('#canvasMinimap')) return;
@@ -738,20 +778,36 @@
         postToBridge('patch_style', { yPos: numericVal, previewOnly, commitScrub });
         break;
       case 'propW': {
-        const props = { width: `${Math.max(4, numericVal)}px`, boxSizing: 'border-box', maxWidth: 'none' };
+        const props = {
+          width: `${Math.max(4, numericVal)}px`,
+          boxSizing: 'border-box',
+          minWidth: '0px',
+          maxWidth: 'none',
+          flex: '0 0 auto'
+        };
         if (state.lockAspect && state.aspectRatio > 0) {
           const h = Math.max(4, Math.round((numericVal / state.aspectRatio) * 10) / 10);
           props.height = `${h}px`;
+          props.minHeight = '0px';
+          props.maxHeight = 'none';
           $('propH').value = `${h}px`;
         }
         postToBridge('patch_style', { props, previewOnly, commitScrub });
         break;
       }
       case 'propH': {
-        const props = { height: `${Math.max(4, numericVal)}px`, boxSizing: 'border-box' };
+        const props = {
+          height: `${Math.max(4, numericVal)}px`,
+          boxSizing: 'border-box',
+          minHeight: '0px',
+          maxHeight: 'none',
+          flex: '0 0 auto'
+        };
         if (state.lockAspect && state.aspectRatio > 0) {
           const w = Math.max(4, Math.round(numericVal * state.aspectRatio * 10) / 10);
           props.width = `${w}px`;
+          props.minWidth = '0px';
+          props.maxWidth = 'none';
           $('propW').value = `${w}px`;
         }
         postToBridge('patch_style', { props, previewOnly, commitScrub });
@@ -2680,8 +2736,1529 @@
   }
 
   // =========================================================================
-  // 9. AGENT NOTES (OUTSIDE HTML DESIGN) & PREFERENCES PERSISTENCE
+  // 9. FIGMA RULERS & SNAP GUIDES + REFERENCE IMAGES + ARROW / VISUAL PNG NOTES
   // =========================================================================
+  function getUserGuidesStorageKey() {
+    return LS_USER_GUIDES_PREFIX + getProjectFolderKey(state.targetPath, state.projectName);
+  }
+
+  function loadUserGuidesFromStorage() {
+    try {
+      const raw = localStorage.getItem(getUserGuidesStorageKey());
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.filter((g) => g && (g.axis === 'h' || g.axis === 'v') && typeof g.pos === 'number') : [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  function persistUserGuidesToStorage() {
+    try {
+      localStorage.setItem(getUserGuidesStorageKey(), JSON.stringify(state.userGuides || []));
+    } catch (_) {}
+  }
+
+  function syncGuidesToBridge() {
+    postToBridge('set_user_guides', {
+      guides: state.smartGuides ? (state.userGuides || []) : []
+    });
+  }
+
+  function syncRulersVisibility() {
+    const grid = $('canvasViewportGrid');
+    const show = Boolean(state.smartGuides) && state.mode === 'edit';
+    if (grid) grid.classList.toggle('hide-rulers', !show);
+    if ($('userGuidesLayer')) $('userGuidesLayer').hidden = !show;
+  }
+
+  function chooseRulerStep(zoom) {
+    const z = Math.max(0.1, zoom || 1);
+    const steps = [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000];
+    for (const s of steps) {
+      if (s * z >= 58) return s;
+    }
+    return 2000;
+  }
+
+  function renderRulers() {
+    syncRulersVisibility();
+    if (!state.smartGuides || state.mode !== 'edit') return;
+    const topC = $('rulerTopCanvas');
+    const leftC = $('rulerLeftCanvas');
+    const topBox = $('rulerTop');
+    const leftBox = $('rulerLeft');
+    if (!topC || !leftC || !topBox || !leftBox) return;
+
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const z = Math.max(0.05, state.zoom || 1);
+    const major = chooseRulerStep(z);
+    const minor = major >= 10 ? major / 5 : 1;
+    const selProps = state.selection?.count > 0 ? state.selection.props : null;
+
+    // 1. Horizontal Top Ruler
+    const tw = Math.max(1, topBox.clientWidth);
+    const th = Math.max(1, topBox.clientHeight || 20);
+    if (topC.width !== Math.round(tw * dpr) || topC.height !== Math.round(th * dpr)) {
+      topC.width = Math.round(tw * dpr);
+      topC.height = Math.round(th * dpr);
+    }
+    const tctx = topC.getContext('2d');
+    tctx.save();
+    tctx.scale(dpr, dpr);
+    tctx.clearRect(0, 0, tw, th);
+    tctx.fillStyle = '#1c1b19';
+    tctx.fillRect(0, 0, tw, th);
+
+    // Artboard span highlight (0 .. artboardWidth)
+    const artX1 = state.panX;
+    const artX2 = state.panX + (state.artboardWidth || 1920) * z;
+    tctx.fillStyle = 'rgba(249, 115, 22, 0.06)';
+    tctx.fillRect(Math.max(0, artX1), 0, Math.max(0, Math.min(tw, artX2) - Math.max(0, artX1)), th);
+
+    // Selected object span highlight (Figma-style)
+    if (selProps && typeof selProps.x === 'number' && typeof selProps.w === 'number') {
+      const sx1 = state.panX + selProps.x * z;
+      const sx2 = state.panX + (selProps.x + selProps.w) * z;
+      tctx.fillStyle = 'rgba(249, 115, 22, 0.22)';
+      tctx.fillRect(sx1, 0, Math.max(1, sx2 - sx1), th);
+    }
+
+    const startArtX = Math.floor((-state.panX / z) / minor) * minor;
+    const endArtX = Math.ceil(((tw - state.panX) / z) / minor) * minor;
+    tctx.font = '600 9px "JetBrains Mono", Consolas, monospace';
+    tctx.textBaseline = 'top';
+    for (let ax = startArtX; ax <= endArtX; ax += minor) {
+      const rx = Math.round((state.panX + ax * z) * 2) / 2;
+      if (rx < -2 || rx > tw + 2) continue;
+      const isMajor = Math.abs(ax % major) < 0.001;
+      tctx.strokeStyle = isMajor ? '#78716c' : '#3f3c38';
+      tctx.lineWidth = 1;
+      tctx.beginPath();
+      tctx.moveTo(rx + 0.5, isMajor ? 2 : th - 5);
+      tctx.lineTo(rx + 0.5, th);
+      tctx.stroke();
+      if (isMajor) {
+        tctx.fillStyle = ax === 0 ? '#fb923c' : '#a8a29e';
+        tctx.fillText(String(Math.round(ax)), rx + 3, 2);
+      }
+    }
+
+    // Vertical user guide markers on top ruler
+    for (const g of state.userGuides || []) {
+      if (g.axis !== 'v') continue;
+      const gx = state.panX + g.pos * z;
+      if (gx >= 0 && gx <= tw) {
+        tctx.fillStyle = '#f97316';
+        tctx.fillRect(gx - 0.75, 0, 1.5, th);
+      }
+    }
+    // Live cursor hairline
+    if (state.rulerCursor && typeof state.rulerCursor.artX === 'number') {
+      const cx = state.panX + state.rulerCursor.artX * z;
+      if (cx >= 0 && cx <= tw) {
+        tctx.fillStyle = '#fb923c';
+        tctx.fillRect(cx - 0.5, 0, 1, th);
+      }
+    }
+    tctx.restore();
+
+    // 2. Vertical Left Ruler
+    const lw = Math.max(1, leftBox.clientWidth || 20);
+    const lh = Math.max(1, leftBox.clientHeight);
+    if (leftC.width !== Math.round(lw * dpr) || leftC.height !== Math.round(lh * dpr)) {
+      leftC.width = Math.round(lw * dpr);
+      leftC.height = Math.round(lh * dpr);
+    }
+    const lctx = leftC.getContext('2d');
+    lctx.save();
+    lctx.scale(dpr, dpr);
+    lctx.clearRect(0, 0, lw, lh);
+    lctx.fillStyle = '#1c1b19';
+    lctx.fillRect(0, 0, lw, lh);
+
+    const artY1 = state.panY;
+    const artY2 = state.panY + (state.artboardHeight || 1080) * z;
+    lctx.fillStyle = 'rgba(249, 115, 22, 0.06)';
+    lctx.fillRect(0, Math.max(0, artY1), lw, Math.max(0, Math.min(lh, artY2) - Math.max(0, artY1)));
+
+    if (selProps && typeof selProps.y === 'number' && typeof selProps.h === 'number') {
+      const sy1 = state.panY + selProps.y * z;
+      const sy2 = state.panY + (selProps.y + selProps.h) * z;
+      lctx.fillStyle = 'rgba(249, 115, 22, 0.22)';
+      lctx.fillRect(0, sy1, lw, Math.max(1, sy2 - sy1));
+    }
+
+    const startArtY = Math.floor((-state.panY / z) / minor) * minor;
+    const endArtY = Math.ceil(((lh - state.panY) / z) / minor) * minor;
+    lctx.font = '600 9px "JetBrains Mono", Consolas, monospace';
+    for (let ay = startArtY; ay <= endArtY; ay += minor) {
+      const ry = Math.round((state.panY + ay * z) * 2) / 2;
+      if (ry < -2 || ry > lh + 2) continue;
+      const isMajor = Math.abs(ay % major) < 0.001;
+      lctx.strokeStyle = isMajor ? '#78716c' : '#3f3c38';
+      lctx.lineWidth = 1;
+      lctx.beginPath();
+      lctx.moveTo(isMajor ? 2 : lw - 5, ry + 0.5);
+      lctx.lineTo(lw, ry + 0.5);
+      lctx.stroke();
+      if (isMajor) {
+        lctx.save();
+        lctx.translate(2, ry + 3);
+        lctx.rotate(-Math.PI / 2);
+        lctx.fillStyle = ay === 0 ? '#fb923c' : '#a8a29e';
+        lctx.textAlign = 'right';
+        lctx.textBaseline = 'top';
+        lctx.fillText(String(Math.round(ay)), 0, 0);
+        lctx.restore();
+      }
+    }
+
+    for (const g of state.userGuides || []) {
+      if (g.axis !== 'h') continue;
+      const gy = state.panY + g.pos * z;
+      if (gy >= 0 && gy <= lh) {
+        lctx.fillStyle = '#f97316';
+        lctx.fillRect(0, gy - 0.75, lw, 1.5);
+      }
+    }
+    if (state.rulerCursor && typeof state.rulerCursor.artY === 'number') {
+      const cy = state.panY + state.rulerCursor.artY * z;
+      if (cy >= 0 && cy <= lh) {
+        lctx.fillStyle = '#fb923c';
+        lctx.fillRect(0, cy - 0.5, lw, 1);
+      }
+    }
+    lctx.restore();
+  }
+
+  function renderUserGuidesUI() {
+    const layer = $('userGuidesLayer');
+    if (!layer) return;
+    layer.innerHTML = '';
+    if (!state.smartGuides || state.mode !== 'edit') return;
+
+    const z = Math.max(0.05, state.zoom || 1);
+    for (const g of state.userGuides || []) {
+      const el = document.createElement('div');
+      el.className = `vc-user-guide ${g.axis === 'h' ? 'is-h' : 'is-v'}${state.selectedGuideId === g.id ? ' is-selected' : ''}`;
+      el.dataset.guideId = g.id;
+      if (g.axis === 'h') {
+        el.style.top = `${Math.round((state.panY + g.pos * z) * 10) / 10}px`;
+      } else {
+        el.style.left = `${Math.round((state.panX + g.pos * z) * 10) / 10}px`;
+      }
+      el.title = `${g.axis === 'h' ? 'Y' : 'X'}: ${g.pos}px · Drag to move · Double-click or drag back to ruler to delete`;
+      const badge = document.createElement('span');
+      badge.className = 'vc-guide-badge';
+      badge.textContent = `${g.axis === 'h' ? 'Y' : 'X'}: ${g.pos}`;
+      el.appendChild(badge);
+
+      el.addEventListener('mousedown', (ev) => {
+        if (ev.button !== 0) return;
+        ev.stopPropagation();
+        ev.preventDefault();
+        state.selectedGuideId = g.id;
+        renderUserGuidesUI();
+        beginGuideDragSession(g, false);
+      });
+      el.addEventListener('dblclick', (ev) => {
+        ev.stopPropagation();
+        ev.preventDefault();
+        state.userGuides = state.userGuides.filter((x) => x.id !== g.id);
+        if (state.selectedGuideId === g.id) state.selectedGuideId = null;
+        persistUserGuidesToStorage();
+        syncGuidesToBridge();
+        renderUserGuidesUI();
+        renderRulers();
+        showToast(`Removed ${g.axis === 'h' ? 'horizontal' : 'vertical'} guide`);
+      });
+      layer.appendChild(el);
+    }
+  }
+
+  function snapGuideArtPos(axis, rawPos, shiftKey) {
+    let p = shiftKey ? Math.round(rawPos / 10) * 10 : Math.round(rawPos);
+    const maxEdge = axis === 'h' ? (state.artboardHeight || 1080) : (state.artboardWidth || 1920);
+    const snapAnchors = [0, Math.round(maxEdge / 2), maxEdge];
+    const thresh = Math.max(2, Math.round(4 / Math.max(0.25, state.zoom || 1)));
+    for (const a of snapAnchors) {
+      if (Math.abs(p - a) <= thresh) {
+        p = a;
+        break;
+      }
+    }
+    return p;
+  }
+
+  function beginGuideDragSession(guideObj, isNewFromRuler) {
+    previewFrame.style.pointerEvents = 'none';
+    document.body.style.cursor = guideObj.axis === 'h' ? 'ns-resize' : 'ew-resize';
+    let overRulerDelete = isNewFromRuler;
+
+    const onMove = (mev) => {
+      const sr = canvasScroll.getBoundingClientRect();
+      const z = Math.max(0.05, state.zoom || 1);
+      if (guideObj.axis === 'h') {
+        const stageY = mev.clientY - sr.top;
+        overRulerDelete = stageY < -1;
+        guideObj.pos = snapGuideArtPos('h', (stageY - state.panY) / z, mev.shiftKey);
+      } else {
+        const stageX = mev.clientX - sr.left;
+        overRulerDelete = stageX < -1;
+        guideObj.pos = snapGuideArtPos('v', (stageX - state.panX) / z, mev.shiftKey);
+      }
+      if (overRulerDelete) {
+        state.userGuides = state.userGuides.filter((x) => x.id !== guideObj.id);
+      } else if (!state.userGuides.some((x) => x.id === guideObj.id)) {
+        state.userGuides.push(guideObj);
+      }
+      renderUserGuidesUI();
+      renderRulers();
+    };
+
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      previewFrame.style.pointerEvents = '';
+      document.body.style.cursor = '';
+      if (overRulerDelete) {
+        state.userGuides = state.userGuides.filter((x) => x.id !== guideObj.id);
+        if (state.selectedGuideId === guideObj.id) state.selectedGuideId = null;
+        if (!isNewFromRuler) showToast('Guide removed');
+      } else {
+        state.selectedGuideId = guideObj.id;
+      }
+      persistUserGuidesToStorage();
+      syncGuidesToBridge();
+      renderUserGuidesUI();
+      renderRulers();
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
+
+  function wireRulersAndUserGuides() {
+    const rTop = $('rulerTop');
+    const rLeft = $('rulerLeft');
+    const rCorner = $('rulerCorner');
+    if (rTop) {
+      rTop.addEventListener('mousedown', (ev) => {
+        if (ev.button !== 0 || state.mode !== 'edit') return;
+        ev.preventDefault();
+        const g = { id: `guide_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`, axis: 'h', pos: 0 };
+        state.selectedGuideId = g.id;
+        beginGuideDragSession(g, true);
+      });
+      rTop.addEventListener('dblclick', (ev) => {
+        if (state.mode !== 'edit') return;
+        const sr = canvasScroll.getBoundingClientRect();
+        const artX = snapGuideArtPos('v', ((ev.clientX - sr.left) - state.panX) / Math.max(0.05, state.zoom), ev.shiftKey);
+        const g = { id: `guide_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`, axis: 'v', pos: artX };
+        state.userGuides.push(g);
+        state.selectedGuideId = g.id;
+        persistUserGuidesToStorage();
+        syncGuidesToBridge();
+        renderUserGuidesUI();
+        renderRulers();
+        showToast(`Added vertical guide at X: ${artX}px`);
+      });
+    }
+    if (rLeft) {
+      rLeft.addEventListener('mousedown', (ev) => {
+        if (ev.button !== 0 || state.mode !== 'edit') return;
+        ev.preventDefault();
+        const g = { id: `guide_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`, axis: 'v', pos: 0 };
+        state.selectedGuideId = g.id;
+        beginGuideDragSession(g, true);
+      });
+      rLeft.addEventListener('dblclick', (ev) => {
+        if (state.mode !== 'edit') return;
+        const sr = canvasScroll.getBoundingClientRect();
+        const artY = snapGuideArtPos('h', ((ev.clientY - sr.top) - state.panY) / Math.max(0.05, state.zoom), ev.shiftKey);
+        const g = { id: `guide_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`, axis: 'h', pos: artY };
+        state.userGuides.push(g);
+        state.selectedGuideId = g.id;
+        persistUserGuidesToStorage();
+        syncGuidesToBridge();
+        renderUserGuidesUI();
+        renderRulers();
+        showToast(`Added horizontal guide at Y: ${artY}px`);
+      });
+    }
+    if (rCorner) {
+      rCorner.addEventListener('click', (ev) => {
+        if (ev.altKey) {
+          state.userGuides = [];
+          state.selectedGuideId = null;
+          persistUserGuidesToStorage();
+          syncGuidesToBridge();
+          renderUserGuidesUI();
+          renderRulers();
+          showToast('Cleared all guides');
+        } else {
+          showToast('Drag from Top or Left ruler to place Figma snap guides (Alt+Click corner to clear all)');
+        }
+      });
+    }
+  }
+
+  // --- Imported / Pasted Reference Images on Workspace (#refImageStage) ---
+  const loadedRefImgCache = new Map();
+
+  function loadHtmlImageAsync(src) {
+    if (!src) return Promise.resolve(null);
+    if (loadedRefImgCache.has(src)) {
+      const cached = loadedRefImgCache.get(src);
+      if (cached.complete && cached.naturalWidth > 0) return Promise.resolve(cached);
+    }
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => {
+        loadedRefImgCache.set(src, img);
+        resolve(img);
+      };
+      img.onerror = () => resolve(null);
+      img.src = src;
+    });
+  }
+
+  function loadStandaloneRefImages() {
+    try {
+      const raw = localStorage.getItem(LS_STANDALONE_REF_IMGS);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  function persistStandaloneRefImages() {
+    try {
+      localStorage.setItem(LS_STANDALONE_REF_IMGS, JSON.stringify(state.refImages || []));
+    } catch (_) {}
+  }
+
+  async function syncRefImageActionToServer(action, payloadObj = {}) {
+    if (state.hasServerBackend && !state.vfsMode) {
+      try {
+        const prevDataById = new Map((state.refImages || []).map((r) => [r.id, r.dataUrl || '']));
+        const resp = await fetch('/__vc_api/ref-images', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action, ...payloadObj })
+        });
+        const json = await resp.json();
+        if (json && Array.isArray(json.refImages)) {
+          state.refImages = json.refImages.map((r) => ({
+            ...r,
+            dataUrl: r.dataUrl || prevDataById.get(r.id) || ''
+          }));
+        }
+      } catch (_) {}
+    } else {
+      persistStandaloneRefImages();
+    }
+  }
+
+  function syncRefImageGizmoScale() {
+    const stage = $('refImageStage');
+    if (!stage) return;
+    const invZ = 1 / Math.max(0.2, state.zoom || 1);
+    stage.querySelectorAll('.vc-ref-head').forEach((h) => {
+      h.style.transform = `scale(${Math.min(2.6, Math.max(0.65, invZ))})`;
+      h.style.top = `${-Math.round(26 * Math.min(2.6, Math.max(0.65, invZ)))}px`;
+    });
+    stage.querySelectorAll('.vc-ref-handle').forEach((hd) => {
+      hd.style.transform = `scale(${Math.min(2.5, Math.max(0.7, invZ))})`;
+    });
+  }
+
+  function renderRefImagesUI() {
+    const stage = $('refImageStage');
+    if (!stage) return;
+    stage.innerHTML = '';
+    if (state.mode !== 'edit') return;
+
+    for (const ref of state.refImages || []) {
+      const card = document.createElement('div');
+      card.className = 'vc-ref-image' + (state.selectedRefImageId === ref.id ? ' selected' : '');
+      card.dataset.refId = ref.id;
+      card.style.left = `${ref.x}px`;
+      card.style.top = `${ref.y}px`;
+      card.style.width = `${ref.w}px`;
+      card.style.height = `${ref.h}px`;
+      card.style.opacity = String(ref.opacity ?? 1);
+
+      const head = document.createElement('div');
+      head.className = 'vc-ref-head';
+      head.innerHTML = `
+        <span class="vc-ref-title">${escapeHtml(ref.name || 'Reference Image')}</span>
+        <button type="button" class="vc-ref-act" data-ract="arrow" title="Draw Note Arrow from this reference image to the design">↗ Arrow Note</button>
+        <button type="button" class="vc-ref-act" data-ract="opacity" title="Toggle 65% / 100% opacity">${Math.round((ref.opacity ?? 1) * 100) < 100 ? '100%' : '65%'}</button>
+        <button type="button" class="vc-ref-act" data-ract="delete" title="Remove reference image (Del)">×</button>
+      `;
+      card.appendChild(head);
+
+      const img = document.createElement('img');
+      img.src = ref.dataUrl || ref.imageUrl || '';
+      img.alt = ref.name || 'Reference Image';
+      card.appendChild(img);
+
+      ['nw', 'ne', 'se', 'sw'].forEach((dir) => {
+        const hd = document.createElement('div');
+        hd.className = 'vc-ref-handle';
+        hd.dataset.rdir = dir;
+        hd.addEventListener('mousedown', (ev) => {
+          if (ev.button !== 0) return;
+          ev.stopPropagation();
+          ev.preventDefault();
+          state.selectedRefImageId = ref.id;
+          beginRefImageResize(ev, ref, dir);
+        });
+        card.appendChild(hd);
+      });
+
+      head.querySelectorAll('[data-ract]').forEach((btn) => {
+        btn.addEventListener('mousedown', (ev) => ev.stopPropagation());
+        btn.addEventListener('click', async (ev) => {
+          ev.stopPropagation();
+          const act = btn.getAttribute('data-ract');
+          if (act === 'delete') {
+            state.refImages = state.refImages.filter((x) => x.id !== ref.id);
+            if (state.selectedRefImageId === ref.id) state.selectedRefImageId = null;
+            renderRefImagesUI();
+            renderWorkspaceAnnotSvg();
+            await syncRefImageActionToServer('delete', { id: ref.id });
+            showToast('Removed reference image');
+          } else if (act === 'opacity') {
+            ref.opacity = (ref.opacity ?? 1) < 0.99 ? 1 : 0.65;
+            renderRefImagesUI();
+            await syncRefImageActionToServer('upsert', { refImage: ref });
+          } else if (act === 'arrow') {
+            state.selectedRefImageId = ref.id;
+            setActiveTool('note');
+            setNoteSubMode('arrow');
+            showToast('Drag an arrow from the reference image onto the target design element');
+          }
+        });
+      });
+
+      card.addEventListener('mousedown', (ev) => {
+        if (ev.button !== 0) return;
+        if (ev.target && ev.target.closest && (ev.target.closest('.vc-ref-handle') || ev.target.closest('[data-ract]'))) return;
+        ev.stopPropagation();
+        ev.preventDefault();
+        state.selectedRefImageId = ref.id;
+        postToBridge('clear_selection');
+        renderRefImagesUI();
+        beginRefImageMove(ev, ref);
+      });
+
+      stage.appendChild(card);
+    }
+    syncRefImageGizmoScale();
+  }
+
+  function beginRefImageMove(ev, ref) {
+    const startX = ev.clientX;
+    const startY = ev.clientY;
+    const origX = ref.x;
+    const origY = ref.y;
+    previewFrame.style.pointerEvents = 'none';
+    let moved = false;
+
+    const onMove = (mev) => {
+      const z = Math.max(0.05, state.zoom || 1);
+      const dx = (mev.clientX - startX) / z;
+      const dy = (mev.clientY - startY) / z;
+      if (!moved && Math.hypot(mev.clientX - startX, mev.clientY - startY) < 2) return;
+      moved = true;
+      ref.x = Math.round(origX + dx);
+      ref.y = Math.round(origY + dy);
+      const card = $('refImageStage')?.querySelector(`[data-ref-id="${CSS.escape(ref.id)}"]`);
+      if (card) {
+        card.style.left = `${ref.x}px`;
+        card.style.top = `${ref.y}px`;
+      }
+    };
+
+    const onUp = async () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      previewFrame.style.pointerEvents = '';
+      if (moved) {
+        await syncRefImageActionToServer('upsert', { refImage: ref });
+        if (state.editingNote) updateNotePopupPreviewImage();
+      }
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
+
+  function beginRefImageResize(ev, ref, dir) {
+    const startX = ev.clientX;
+    const startY = ev.clientY;
+    const orig = { x: ref.x, y: ref.y, w: ref.w, h: ref.h, ratio: Math.max(0.1, ref.w / Math.max(1, ref.h)) };
+    previewFrame.style.pointerEvents = 'none';
+    let moved = false;
+
+    const onMove = (mev) => {
+      moved = true;
+      const z = Math.max(0.05, state.zoom || 1);
+      const dx = (mev.clientX - startX) / z;
+      const dy = (mev.clientY - startY) / z;
+      let nextW = dir.includes('e') ? orig.w + dx : orig.w - dx;
+      let nextH = dir.includes('s') ? orig.h + dy : orig.h - dy;
+      nextW = Math.max(48, nextW);
+      if (!mev.altKey) {
+        nextH = Math.max(36, nextW / orig.ratio);
+      } else {
+        nextH = Math.max(36, nextH);
+      }
+      const nextX = dir.includes('w') ? orig.x + (orig.w - nextW) : orig.x;
+      const nextY = dir.includes('n') ? orig.y + (orig.h - nextH) : orig.y;
+      ref.x = Math.round(nextX);
+      ref.y = Math.round(nextY);
+      ref.w = Math.round(nextW);
+      ref.h = Math.round(nextH);
+      const card = $('refImageStage')?.querySelector(`[data-ref-id="${CSS.escape(ref.id)}"]`);
+      if (card) {
+        card.style.left = `${ref.x}px`;
+        card.style.top = `${ref.y}px`;
+        card.style.width = `${ref.w}px`;
+        card.style.height = `${ref.h}px`;
+      }
+    };
+
+    const onUp = async () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      previewFrame.style.pointerEvents = '';
+      if (moved) {
+        await syncRefImageActionToServer('upsert', { refImage: ref });
+        if (state.editingNote) updateNotePopupPreviewImage();
+      }
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
+
+  async function importReferenceImageDataUrl(dataUrl, rawName = 'Reference Image', dropArtPos = null) {
+    if (!dataUrl || !dataUrl.startsWith('data:image/')) return null;
+    const imgEl = await loadHtmlImageAsync(dataUrl);
+    const natW = imgEl?.naturalWidth || 420;
+    const natH = imgEl?.naturalHeight || 300;
+    const maxInit = 420;
+    const scale = Math.min(1, maxInit / Math.max(natW, natH, 1));
+    const w = Math.max(80, Math.round(natW * scale));
+    const h = Math.max(60, Math.round(natH * scale));
+
+    const z = Math.max(0.1, state.zoom || 1);
+    const sr = canvasScroll.getBoundingClientRect();
+    const vpLeftArt = -state.panX / z;
+    const vpTopArt = -state.panY / z;
+    const stagger = (state.refImages.length % 5) * 28;
+
+    let x;
+    let y;
+    if (dropArtPos && typeof dropArtPos.x === 'number') {
+      x = Math.round(dropArtPos.x - w / 2);
+      y = Math.round(dropArtPos.y - h / 2);
+    } else {
+      // Place neatly inside the visible left workspace area so user sees it immediately and can drag arrows to the design!
+      const pasteboardCandidateX = -w - 36;
+      if (pasteboardCandidateX >= vpLeftArt + 12) {
+        x = Math.round(pasteboardCandidateX);
+      } else {
+        x = Math.round(vpLeftArt + 24 + stagger);
+      }
+      y = Math.round(Math.max(vpTopArt + 34, 36) + stagger);
+    }
+
+    const refObj = {
+      id: `ref_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      name: String(rawName || 'Reference Image').replace(/\.[a-z0-9]+$/i, '').slice(0, 36) || 'Reference Image',
+      dataUrl,
+      x,
+      y,
+      w,
+      h,
+      naturalW: natW,
+      naturalH: natH,
+      opacity: 1
+    };
+
+    state.refImages.push(refObj);
+    state.selectedRefImageId = refObj.id;
+    renderRefImagesUI();
+    await syncRefImageActionToServer('upsert', { refImage: refObj });
+
+    // If Note Popup is currently open, link this reference image & refresh the visual PNG preview!
+    if (state.editingNote && !$('notePopup')?.hidden) {
+      const refs = Array.isArray(state.editingNote.referenceImages) ? [...state.editingNote.referenceImages] : [];
+      if (!refs.some((r) => r.id === refObj.id)) {
+        refs.push({ id: refObj.id, name: refObj.name, x: refObj.x, y: refObj.y, w: refObj.w, h: refObj.h });
+      }
+      state.editingNote.referenceImages = refs;
+      updateNotePopupPreviewImage();
+    }
+
+    showToast(`Imported "${refObj.name}" — Click "↗ Arrow Note" or press N to point to the design`);
+    return refObj;
+  }
+
+  function ingestImageFilesList(filesList, dropArtPos = null) {
+    const imgFiles = Array.from(filesList || []).filter((f) => f && f.type && f.type.startsWith('image/'));
+    if (!imgFiles.length) return false;
+    imgFiles.forEach((file, idx) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (typeof reader.result === 'string') {
+          const pos = dropArtPos ? { x: dropArtPos.x + idx * 24, y: dropArtPos.y + idx * 24 } : null;
+          importReferenceImageDataUrl(reader.result, file.name || 'Reference Image', pos);
+        }
+      };
+      reader.readAsDataURL(file);
+    });
+    return true;
+  }
+
+  // --- Note Tool Arrow Sub-Mode & Workspace Vector Arrow Overlay ---
+  function syncNoteArrowCaptureLayer() {
+    const cap = $('noteArrowCapture');
+    if (!cap) return;
+    const active =
+      state.mode === 'edit' &&
+      ((state.tool === 'note' && state.noteMode === 'arrow') || state.addingArrowToEditingNote);
+    cap.hidden = !active;
+  }
+
+  function setNoteSubMode(subMode) {
+    state.noteMode = subMode === 'arrow' ? 'arrow' : 'box';
+    state.addingArrowToEditingNote = false;
+    document.querySelectorAll('#noteSubbar .note-mode-opt[data-note-mode]').forEach((btn) => {
+      btn.classList.toggle('active', btn.getAttribute('data-note-mode') === state.noteMode);
+    });
+    syncNoteArrowCaptureLayer();
+  }
+
+  function inspectNotePointFromBridge(artX, artY, timeoutMs = 1200) {
+    const reqId = `npt_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        pendingNotePointResolvers.delete(reqId);
+        resolve({
+          selector: 'body',
+          elementTag: 'region',
+          sectionLabel: '',
+          markRect: {
+            x: Math.round(artX) - 22,
+            y: Math.round(artY) - 22,
+            w: 44,
+            h: 44,
+            artboardW: state.artboardWidth,
+            artboardH: state.artboardHeight
+          },
+          enclosedElements: [],
+          htmlSnippet: ''
+        });
+      }, timeoutMs);
+      pendingNotePointResolvers.set(reqId, (res) => {
+        clearTimeout(timer);
+        resolve(res);
+      });
+      postToBridge('inspect_note_point', { requestId: reqId, artX, artY });
+    });
+  }
+
+  function buildArrowSvgMarkup(x1, y1, x2, y2, badgeText = '', noteId = '', isDraft = false) {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const len = Math.hypot(dx, dy);
+    if (len < 3) return '';
+    const ux = dx / len;
+    const uy = dy / len;
+    const px = -uy;
+    const py = ux;
+    const headLen = Math.min(16, Math.max(10, len * 0.25));
+    const headHalfW = headLen * 0.52;
+    const shaftEndX = x2 - ux * (headLen * 0.72);
+    const shaftEndY = y2 - uy * (headLen * 0.72);
+    const p1x = x2;
+    const p1y = y2;
+    const p2x = x2 - ux * headLen + px * headHalfW;
+    const p2y = y2 - uy * headLen + py * headHalfW;
+    const p3x = x2 - ux * headLen - px * headHalfW;
+    const p3y = y2 - uy * headLen - py * headHalfW;
+
+    const dashAttr = isDraft ? ' stroke-dasharray="6 4"' : '';
+    const badgeMarkup = badgeText
+      ? `<g class="vc-annot-pin-hit" data-annot-note="${escapeHtml(noteId)}" transform="translate(${Math.round(x1)}, ${Math.round(y1)})">
+          <circle r="10.5" fill="#f97316" stroke="#141312" stroke-width="1.8"/>
+          <text x="0" y="3.5" text-anchor="middle" fill="#141312" font-family="Inter, sans-serif" font-size="10" font-weight="800">${escapeHtml(badgeText)}</text>
+        </g>`
+      : `<circle cx="${x1.toFixed(1)}" cy="${y1.toFixed(1)}" r="4.5" fill="#f97316" stroke="#141312" stroke-width="1.6"/>`;
+
+    return `
+      <g class="vc-annot-arrow">
+        <line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${shaftEndX.toFixed(1)}" y2="${shaftEndY.toFixed(1)}" stroke="#141312" stroke-width="4.6" stroke-linecap="round"${dashAttr}/>
+        <line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${shaftEndX.toFixed(1)}" y2="${shaftEndY.toFixed(1)}" stroke="#f97316" stroke-width="2.5" stroke-linecap="round"${dashAttr}/>
+        <polygon points="${p1x.toFixed(1)},${p1y.toFixed(1)} ${p2x.toFixed(1)},${p2y.toFixed(1)} ${p3x.toFixed(1)},${p3y.toFixed(1)}" fill="#f97316" stroke="#141312" stroke-width="1.4" stroke-linejoin="round"/>
+        ${badgeMarkup}
+      </g>
+    `;
+  }
+
+  function renderWorkspaceAnnotSvg() {
+    const svg = $('workspaceAnnotSvg');
+    if (!svg) return;
+    if (state.mode !== 'edit') {
+      svg.innerHTML = '';
+      return;
+    }
+    const z = Math.max(0.05, state.zoom || 1);
+    const toStageX = (ax) => state.panX + ax * z;
+    const toStageY = (ay) => state.panY + ay * z;
+
+    const chunks = [];
+    if (state.showNotes) {
+      for (const n of getNotesForCurrentEntry()) {
+        if (!Array.isArray(n.arrows) || !n.arrows.length) continue;
+        n.arrows.forEach((ar, idx) => {
+          chunks.push(
+            buildArrowSvgMarkup(
+              toStageX(ar.x1),
+              toStageY(ar.y1),
+              toStageX(ar.x2),
+              toStageY(ar.y2),
+              idx === 0 ? `#${n.number || '!'}` : '',
+              n.id || '',
+              false
+            )
+          );
+        });
+      }
+    }
+    if (state.editingNote && !state.editingNote.id && Array.isArray(state.editingNote.arrows)) {
+      state.editingNote.arrows.forEach((ar, idx) => {
+        chunks.push(
+          buildArrowSvgMarkup(
+            toStageX(ar.x1),
+            toStageY(ar.y1),
+            toStageX(ar.x2),
+            toStageY(ar.y2),
+            idx === 0 ? `#${state.notes.length + 1}` : '',
+            '',
+            false
+          )
+        );
+      });
+    }
+    if (state.draftArrow) {
+      chunks.push(
+        buildArrowSvgMarkup(
+          toStageX(state.draftArrow.x1),
+          toStageY(state.draftArrow.y1),
+          toStageX(state.draftArrow.x2),
+          toStageY(state.draftArrow.y2),
+          '',
+          '',
+          true
+        )
+      );
+    }
+    svg.innerHTML = chunks.join('');
+    svg.querySelectorAll('.vc-annot-pin-hit[data-annot-note]').forEach((gEl) => {
+      gEl.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const nid = gEl.getAttribute('data-annot-note');
+        const found = state.notes.find((x) => x.id === nid);
+        if (found) openNotePopup(found);
+      });
+    });
+  }
+
+  let lastStudioPasteEventTs = 0;
+
+  function wireReferenceImagesAndArrowCapture() {
+    const triggerRefPicker = () => {
+      const inp = $('refImgFileInput');
+      if (inp) {
+        inp.value = '';
+        inp.click();
+      }
+    };
+    if ($('btnDockAddImage')) $('btnDockAddImage').addEventListener('click', triggerRefPicker);
+    if ($('btnNoteSubAddImg')) $('btnNoteSubAddImg').addEventListener('click', triggerRefPicker);
+    if ($('btnNotePopupAddImg')) $('btnNotePopupAddImg').addEventListener('click', triggerRefPicker);
+    if ($('refImgFileInput')) {
+      $('refImgFileInput').addEventListener('change', (ev) => {
+        ingestImageFilesList(ev.target.files, null);
+      });
+    }
+
+    document.querySelectorAll('#noteSubbar .note-mode-opt[data-note-mode]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        setNoteSubMode(btn.getAttribute('data-note-mode'));
+      });
+    });
+
+    if ($('btnNoteDrawArrow')) {
+      $('btnNoteDrawArrow').addEventListener('click', () => {
+        if (!state.editingNote) return;
+        state.addingArrowToEditingNote = true;
+        $('notePopup').hidden = true;
+        syncNoteArrowCaptureLayer();
+        showToast('Drag an arrow from your reference image (or any point) to the target UI spot');
+      });
+    }
+
+    if ($('btnNoteClearArrows')) {
+      $('btnNoteClearArrows').addEventListener('click', () => {
+        if (!state.editingNote) return;
+        state.editingNote.arrows = [];
+        $('btnNoteClearArrows').hidden = true;
+        renderWorkspaceAnnotSvg();
+        updateNotePopupPreviewImage();
+      });
+    }
+
+    if ($('btnDownloadNotePng')) {
+      $('btnDownloadNotePng').addEventListener('click', async () => {
+        if (!state.editingNote) return;
+        const draft = {
+          ...state.editingNote,
+          taskType: state.noteTaskType,
+          text: ($('notePopupInput')?.value || '').trim() || state.editingNote.text || ''
+        };
+        const pngUrl = await renderNoteCompositePng(draft);
+        if (!pngUrl) return;
+        const a = document.createElement('a');
+        a.href = pngUrl;
+        a.download = `vectora-note-${draft.number || (state.notes.length + 1)}.png`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      });
+    }
+
+    // Paste image anywhere in Studio shell (Ctrl+V)
+    window.addEventListener('paste', (ev) => {
+      lastStudioPasteEventTs = Date.now();
+      if (state.mode !== 'edit') return;
+      if (['INPUT', 'TEXTAREA'].includes(ev.target?.tagName) && ev.target.id !== 'notePopupInput') return;
+      const items = Array.from(ev.clipboardData?.items || []);
+      const imgItems = items.filter((it) => it.type && it.type.startsWith('image/'));
+      if (imgItems.length > 0) {
+        ev.preventDefault();
+        imgItems.forEach((it) => {
+          const f = it.getAsFile();
+          if (f) ingestImageFilesList([f], null);
+        });
+      } else if (!['INPUT', 'TEXTAREA'].includes(ev.target?.tagName)) {
+        postToBridge('clipboard', { action: 'paste' });
+      }
+    });
+
+    // Drag & drop reference images onto workspace
+    const vpGrid = $('canvasViewportGrid') || canvasScroll;
+    vpGrid.addEventListener('dragover', (ev) => {
+      if (ev.dataTransfer && Array.from(ev.dataTransfer.types || []).includes('Files')) {
+        ev.preventDefault();
+      }
+    });
+    vpGrid.addEventListener('drop', (ev) => {
+      const files = ev.dataTransfer?.files;
+      if (!files || !files.length) return;
+      const hasImages = Array.from(files).some((f) => f.type && f.type.startsWith('image/'));
+      if (hasImages) {
+        ev.preventDefault();
+        const sr = canvasScroll.getBoundingClientRect();
+        const z = Math.max(0.05, state.zoom || 1);
+        const dropArt = {
+          x: ((ev.clientX - sr.left) - state.panX) / z,
+          y: ((ev.clientY - sr.top) - state.panY) / z
+        };
+        ingestImageFilesList(files, dropArt);
+      }
+    });
+
+    // Arrow drawing gesture across both pasteboard reference images AND artboard iframe
+    const cap = $('noteArrowCapture');
+    if (cap) {
+      cap.addEventListener('mousedown', (ev) => {
+        if (ev.button === 1 || state.spaceHeld) {
+          ev.preventDefault();
+          startCanvasPan(ev.clientX, ev.clientY);
+          return;
+        }
+        if (ev.button !== 0) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        const sr = canvasScroll.getBoundingClientRect();
+        const z = Math.max(0.05, state.zoom || 1);
+        const toArt = (cx, cy) => ({
+          x: Math.round(((cx - sr.left) - state.panX) / z),
+          y: Math.round(((cy - sr.top) - state.panY) / z)
+        });
+        const p1 = toArt(ev.clientX, ev.clientY);
+        state.draftArrow = { x1: p1.x, y1: p1.y, x2: p1.x, y2: p1.y };
+
+        const onMove = (mev) => {
+          const p2 = toArt(mev.clientX, mev.clientY);
+          state.draftArrow = { x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y };
+          renderWorkspaceAnnotSvg();
+        };
+
+        const onUp = async (uev) => {
+          window.removeEventListener('mousemove', onMove);
+          window.removeEventListener('mouseup', onUp);
+          const p2 = toArt(uev.clientX, uev.clientY);
+          const finished = { x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y };
+          state.draftArrow = null;
+
+          if (Math.hypot(finished.x2 - finished.x1, finished.y2 - finished.y1) < 8) {
+            // Short click -> shift endpoint slightly so arrow is still visible pointing to clicked spot
+            finished.x1 = finished.x2 - 64;
+            finished.y1 = finished.y2 - 48;
+          }
+
+          // Check if arrow originates from or touches any imported Reference Image
+          const linkedRefs = [];
+          for (const ref of state.refImages || []) {
+            const nearStart =
+              finished.x1 >= ref.x - 24 &&
+              finished.x1 <= ref.x + ref.w + 24 &&
+              finished.y1 >= ref.y - 24 &&
+              finished.y1 <= ref.y + ref.h + 24;
+            const nearEnd =
+              finished.x2 >= ref.x - 24 &&
+              finished.x2 <= ref.x + ref.w + 24 &&
+              finished.y2 >= ref.y - 24 &&
+              finished.y2 <= ref.y + ref.h + 24;
+            if (nearStart || nearEnd) {
+              finished.refImageId = ref.id;
+              finished.sourceRefImageId = ref.id;
+              linkedRefs.push({
+                id: ref.id,
+                name: ref.name,
+                x: ref.x,
+                y: ref.y,
+                w: ref.w,
+                h: ref.h,
+                imagePath: ref.imagePath || '',
+                imageUrl: ref.imageUrl || ''
+              });
+            }
+          }
+
+          const inspected = await inspectNotePointFromBridge(finished.x2, finished.y2);
+
+          if (state.addingArrowToEditingNote && state.editingNote) {
+            state.addingArrowToEditingNote = false;
+            syncNoteArrowCaptureLayer();
+            const prevArrows = Array.isArray(state.editingNote.arrows) ? state.editingNote.arrows : [];
+            const prevRefs = Array.isArray(state.editingNote.referenceImages) ? state.editingNote.referenceImages : [];
+            const mergedRefs = [...prevRefs];
+            for (const lr of linkedRefs) {
+              if (!mergedRefs.some((x) => x.id === lr.id)) mergedRefs.push(lr);
+            }
+            state.editingNote.arrows = [...prevArrows, finished];
+            state.editingNote.referenceImages = mergedRefs;
+            if (inspected && inspected.insideArtboard) {
+              state.editingNote.selector = inspected.selector || state.editingNote.selector;
+              state.editingNote.elementTag = inspected.elementTag || state.editingNote.elementTag;
+              state.editingNote.sectionLabel = inspected.sectionLabel || state.editingNote.sectionLabel;
+              state.editingNote.markRect = inspected.markRect || state.editingNote.markRect;
+              state.editingNote.enclosedElements = inspected.enclosedElements || state.editingNote.enclosedElements;
+              state.editingNote.htmlSnippet = inspected.htmlSnippet || state.editingNote.htmlSnippet;
+            }
+            renderWorkspaceAnnotSvg();
+            openNotePopup(state.editingNote);
+            return;
+          }
+
+          renderWorkspaceAnnotSvg();
+          openNotePopup({
+            selector: inspected.selector,
+            elementTag: inspected.elementTag,
+            sectionLabel: inspected.sectionLabel || '',
+            markRect: inspected.markRect,
+            enclosedElements: Array.isArray(inspected.enclosedElements) ? inspected.enclosedElements : [],
+            htmlSnippet: inspected.htmlSnippet || '',
+            arrows: [finished],
+            referenceImages: linkedRefs,
+            taskType: 'fix',
+            text: ''
+          });
+        };
+
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+      });
+    }
+  }
+
+  // --- Faithful Taint-Safe Composite Visual PNG Note Renderer ---
+  function drawRoundedRectPath(ctx, x, y, w, h, r) {
+    const rad = Math.max(0, Math.min(r || 0, Math.min(w, h) / 2));
+    ctx.beginPath();
+    if (typeof ctx.roundRect === 'function') {
+      ctx.roundRect(x, y, w, h, rad);
+    } else {
+      ctx.moveTo(x + rad, y);
+      ctx.arcTo(x + w, y, x + w, y + h, rad);
+      ctx.arcTo(x + w, y + h, x, y + h, rad);
+      ctx.arcTo(x, y + h, x, y, rad);
+      ctx.arcTo(x, y, x + w, y, rad);
+      ctx.closePath();
+    }
+  }
+
+  function paintIframeArtboardRegionToCanvas(ctx, cropArtRect, mapX, mapY, scale) {
+    const artW = state.artboardWidth || 1920;
+    const artH = state.artboardHeight || 1080;
+    const ax1 = Math.max(0, cropArtRect.x);
+    const ay1 = Math.max(0, cropArtRect.y);
+    const ax2 = Math.min(artW, cropArtRect.x + cropArtRect.w);
+    const ay2 = Math.min(artH, cropArtRect.y + cropArtRect.h);
+    if (ax2 <= ax1 || ay2 <= ay1) return;
+
+    const doc = previewFrame?.contentDocument;
+    const win = previewFrame?.contentWindow;
+    const dx = mapX(ax1);
+    const dy = mapY(ay1);
+    const dw = (ax2 - ax1) * scale;
+    const dh = (ay2 - ay1) * scale;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(dx, dy, dw, dh);
+    ctx.clip();
+
+    // Base artboard background
+    let bodyBg = '#151413';
+    let br = { left: 0, top: 0 };
+    if (doc && doc.body && win) {
+      br = doc.body.getBoundingClientRect();
+      const bcs = win.getComputedStyle(doc.body);
+      if (bcs.backgroundColor && bcs.backgroundColor !== 'rgba(0, 0, 0, 0)' && bcs.backgroundColor !== 'transparent') {
+        bodyBg = bcs.backgroundColor;
+      }
+    }
+    ctx.fillStyle = bodyBg;
+    ctx.fillRect(dx, dy, dw, dh);
+    ctx.strokeStyle = '#3f3c38';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(dx + 0.5, dy + 0.5, dw - 1, dh - 1);
+
+    if (doc && doc.body && win) {
+      const allEls = doc.body.querySelectorAll('*');
+      for (const el of allEls) {
+        if (!el || el.id === '__vc_overlay_root__' || el.hasAttribute('data-vc-bridge')) continue;
+        if (el.closest && el.closest('#__vc_overlay_root__')) continue;
+        const tag = el.tagName.toUpperCase();
+        if (['SCRIPT', 'STYLE', 'LINK', 'META', 'NOSCRIPT', 'BR', 'DEFS', 'PATH', 'G', 'CIRCLE', 'RECT', 'LINE', 'POLYLINE', 'POLYGON'].includes(tag)) continue;
+
+        const cs = win.getComputedStyle(el);
+        if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity || '1') <= 0.02) continue;
+
+        const r = el.getBoundingClientRect();
+        if (r.width < 2 || r.height < 2) continue;
+        const ex = r.left - br.left;
+        const ey = r.top - br.top;
+        if (ex + r.width < ax1 || ex > ax2 || ey + r.height < ay1 || ey > ay2) continue;
+
+        const rx = mapX(ex);
+        const ry = mapY(ey);
+        const rw = r.width * scale;
+        const rh = r.height * scale;
+        const rad = (parseFloat(cs.borderTopLeftRadius) || 0) * scale;
+
+        ctx.save();
+        ctx.globalAlpha = Math.min(1, Math.max(0.05, parseFloat(cs.opacity || '1')));
+
+        const bgCol = cs.backgroundColor;
+        const hasBg = bgCol && bgCol !== 'rgba(0, 0, 0, 0)' && bgCol !== 'transparent';
+        const bgImg = cs.backgroundImage || '';
+        if (hasBg || bgImg.includes('gradient')) {
+          drawRoundedRectPath(ctx, rx, ry, rw, rh, rad);
+          if (bgImg.includes('gradient')) {
+            const hexMatches = bgImg.match(/#[0-9a-f]{3,8}|rgba?\([^)]+\)/gi);
+            if (hexMatches && hexMatches.length >= 2) {
+              const g = ctx.createLinearGradient(rx, ry, rx + rw, ry + rh);
+              g.addColorStop(0, hexMatches[0]);
+              g.addColorStop(1, hexMatches[hexMatches.length - 1]);
+              ctx.fillStyle = g;
+            } else {
+              ctx.fillStyle = hasBg ? bgCol : '#292524';
+            }
+          } else {
+            ctx.fillStyle = bgCol;
+          }
+          ctx.fill();
+        }
+
+        // Draw <canvas> or <img> visual contents safely
+        if (tag === 'CANVAS' || tag === 'IMG') {
+          try {
+            drawRoundedRectPath(ctx, rx, ry, rw, rh, rad);
+            ctx.save();
+            ctx.clip();
+            ctx.drawImage(el, rx, ry, rw, rh);
+            ctx.restore();
+          } catch (_) {}
+        }
+
+        // Borders
+        const bw = parseFloat(cs.borderTopWidth) || 0;
+        if (bw > 0 && cs.borderTopStyle !== 'none' && cs.borderTopColor !== 'transparent') {
+          drawRoundedRectPath(ctx, rx, ry, rw, rh, rad);
+          ctx.strokeStyle = cs.borderTopColor;
+          ctx.lineWidth = Math.max(0.8, bw * scale);
+          ctx.stroke();
+        }
+
+        // Direct text nodes or input/textarea/select value
+        let directText = '';
+        if (tag === 'INPUT' || tag === 'TEXTAREA') {
+          directText = el.value || el.getAttribute('placeholder') || '';
+        } else if (tag === 'SELECT') {
+          directText = el.options?.[el.selectedIndex]?.text || '';
+        } else {
+          for (let ci = 0; ci < el.childNodes.length; ci++) {
+            const cn = el.childNodes[ci];
+            if (cn.nodeType === 3 && cn.nodeValue && cn.nodeValue.trim()) {
+              directText += (directText ? ' ' : '') + cn.nodeValue.replace(/\s+/g, ' ').trim();
+            }
+          }
+        }
+        if (directText) {
+          const fs = Math.max(7, (parseFloat(cs.fontSize) || 12) * scale);
+          const fw = cs.fontWeight || '500';
+          const fam = (cs.fontFamily || 'Inter, sans-serif').split(',')[0].replace(/['"]/g, '').trim() || 'Inter';
+          let shown = cs.textTransform === 'uppercase' ? directText.toUpperCase() : directText;
+          ctx.font = `${fw} ${fs.toFixed(1)}px "${fam}", Inter, sans-serif`;
+          ctx.fillStyle = (tag === 'INPUT' || tag === 'TEXTAREA') && !el.value ? '#78716c' : (cs.color || '#ece9e5');
+          ctx.textBaseline = 'middle';
+          const padL = (parseFloat(cs.paddingLeft) || 0) * scale;
+          const padR = (parseFloat(cs.paddingRight) || 0) * scale;
+          const maxTxtW = Math.max(12, rw - padL - padR);
+          if (ctx.measureText(shown).width > maxTxtW + 6 && shown.length > 6) {
+            while (shown.length > 4 && ctx.measureText(shown + '…').width > maxTxtW) {
+              shown = shown.slice(0, -1);
+            }
+            shown += '…';
+          }
+          const align = cs.textAlign || (tag === 'BUTTON' ? 'center' : 'left');
+          if (align === 'center') {
+            ctx.textAlign = 'center';
+            ctx.fillText(shown, rx + rw / 2, ry + rh / 2);
+          } else if (align === 'right' || align === 'end') {
+            ctx.textAlign = 'right';
+            ctx.fillText(shown, rx + rw - padR, ry + rh / 2);
+          } else {
+            ctx.textAlign = 'left';
+            ctx.fillText(shown, rx + padL, ry + rh / 2);
+          }
+        }
+        ctx.restore();
+      }
+    }
+    ctx.restore();
+  }
+
+  function drawCanvasVectorArrow(ctx, x1, y1, x2, y2, badgeLabel) {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const len = Math.hypot(dx, dy);
+    if (len < 3) return;
+    const ux = dx / len;
+    const uy = dy / len;
+    const px = -uy;
+    const py = ux;
+    const headLen = Math.min(18, Math.max(11, len * 0.25));
+    const headHalf = headLen * 0.54;
+    const sx2 = x2 - ux * (headLen * 0.72);
+    const sy2 = y2 - uy * (headLen * 0.72);
+
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = '#141312';
+    ctx.lineWidth = 5.2;
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(sx2, sy2);
+    ctx.stroke();
+
+    ctx.strokeStyle = '#f97316';
+    ctx.lineWidth = 2.8;
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(sx2, sy2);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(x2, y2);
+    ctx.lineTo(x2 - ux * headLen + px * headHalf, y2 - uy * headLen + py * headHalf);
+    ctx.lineTo(x2 - ux * headLen - px * headHalf, y2 - uy * headLen - py * headHalf);
+    ctx.closePath();
+    ctx.fillStyle = '#f97316';
+    ctx.strokeStyle = '#141312';
+    ctx.lineWidth = 1.6;
+    ctx.fill();
+    ctx.stroke();
+
+    if (badgeLabel) {
+      ctx.beginPath();
+      ctx.arc(x1, y1, 11, 0, Math.PI * 2);
+      ctx.fillStyle = '#f97316';
+      ctx.fill();
+      ctx.lineWidth = 1.8;
+      ctx.strokeStyle = '#141312';
+      ctx.stroke();
+      ctx.fillStyle = '#141312';
+      ctx.font = '800 10.5px Inter, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(badgeLabel, x1, y1 + 0.5);
+    }
+    ctx.restore();
+  }
+
+  async function renderNoteCompositePng(noteObj) {
+    try {
+      const mr = noteObj.markRect || { x: 40, y: 40, w: 180, h: 64 };
+      const arrows = Array.isArray(noteObj.arrows) ? noteObj.arrows : [];
+      const padContext = 140;
+
+      let minX = (mr.x ?? 40) - padContext;
+      let minY = (mr.y ?? 40) - padContext;
+      let maxX = (mr.x ?? 40) + (mr.w || 160) + padContext;
+      let maxY = (mr.y ?? 40) + (mr.h || 60) + padContext;
+
+      for (const ar of arrows) {
+        minX = Math.min(minX, ar.x1 - 48, ar.x2 - 48);
+        minY = Math.min(minY, ar.y1 - 48, ar.y2 - 48);
+        maxX = Math.max(maxX, ar.x1 + 48, ar.x2 + 48);
+        maxY = Math.max(maxY, ar.y1 + 48, ar.y2 + 48);
+      }
+
+      // Include linked or nearby Reference Images in the composite visual PNG!
+      const refIds = new Set(
+        [
+          ...(Array.isArray(noteObj.referenceImages) ? noteObj.referenceImages.map((r) => r.id) : []),
+          ...arrows.map((a) => a.refImageId).filter(Boolean)
+        ].filter(Boolean)
+      );
+      const relevantRefs = [];
+      for (const ref of state.refImages || []) {
+        const overlapsRegion =
+          ref.x + ref.w >= minX - 40 &&
+          ref.x <= maxX + 40 &&
+          ref.y + ref.h >= minY - 40 &&
+          ref.y <= maxY + 40;
+        if (refIds.has(ref.id) || overlapsRegion) {
+          relevantRefs.push(ref);
+          minX = Math.min(minX, ref.x - 28);
+          minY = Math.min(minY, ref.y - 36);
+          maxX = Math.max(maxX, ref.x + ref.w + 28);
+          maxY = Math.max(maxY, ref.y + ref.h + 28);
+        }
+      }
+
+      // Clamp artboard-only notes gently so bounds stay focused
+      if (!relevantRefs.length && !arrows.length) {
+        minX = Math.max(0, minX);
+        minY = Math.max(0, minY);
+        maxX = Math.min(state.artboardWidth || 1920, maxX);
+        maxY = Math.min(state.artboardHeight || 1080, maxY);
+      }
+
+      const worldW = Math.max(220, maxX - minX);
+      const worldH = Math.max(140, maxY - minY);
+      const maxOutW = 1080;
+      const minOutW = 560;
+      const scale = Math.min(1.6, Math.max(minOutW / worldW, Math.min(1, maxOutW / worldW)));
+      const sceneW = Math.round(Math.max(480, Math.min(1160, worldW * scale)));
+      const effScale = sceneW / worldW;
+      const sceneH = Math.round(Math.max(200, Math.min(860, worldH * effScale)));
+      const footerH = 84;
+
+      const canvas = document.createElement('canvas');
+      canvas.width = sceneW;
+      canvas.height = sceneH + footerH;
+      const ctx = canvas.getContext('2d');
+
+      // Pasteboard backdrop + subtle dot grid
+      ctx.fillStyle = '#121110';
+      ctx.fillRect(0, 0, sceneW, sceneH);
+      ctx.fillStyle = 'rgba(168, 162, 158, 0.14)';
+      for (let gx = 12; gx < sceneW; gx += 20) {
+        for (let gy = 12; gy < sceneH; gy += 20) {
+          ctx.fillRect(gx, gy, 1.2, 1.2);
+        }
+      }
+
+      const mapX = (wx) => (wx - minX) * effScale;
+      const mapY = (wy) => (wy - minY) * effScale;
+
+      // 1. Paint live Artboard Design Region
+      paintIframeArtboardRegionToCanvas(ctx, { x: minX, y: minY, w: worldW, h: worldH }, mapX, mapY, effScale);
+
+      // 2. Paint Pasted Reference Images at full clarity
+      for (const ref of relevantRefs) {
+        const imgEl = await loadHtmlImageAsync(ref.dataUrl || ref.imageUrl);
+        if (!imgEl) continue;
+        const rx = mapX(ref.x);
+        const ry = mapY(ref.y);
+        const rw = ref.w * effScale;
+        const rh = ref.h * effScale;
+        ctx.save();
+        ctx.globalAlpha = ref.opacity ?? 1;
+        drawRoundedRectPath(ctx, rx, ry, rw, rh, 5);
+        ctx.save();
+        ctx.clip();
+        ctx.drawImage(imgEl, rx, ry, rw, rh);
+        ctx.restore();
+        ctx.strokeStyle = '#f97316';
+        ctx.lineWidth = 1.8;
+        ctx.stroke();
+
+        // Reference image pill header
+        const pillTxt = `REF: ${ref.name || 'Image'}`;
+        ctx.font = '700 10px Inter, sans-serif';
+        const pw = Math.min(rw, ctx.measureText(pillTxt).width + 12);
+        ctx.fillStyle = '#23211f';
+        ctx.fillRect(rx, Math.max(2, ry - 18), pw, 16);
+        ctx.strokeStyle = '#f97316';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(rx, Math.max(2, ry - 18), pw, 16);
+        ctx.fillStyle = '#fb923c';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(pillTxt, rx + 5, Math.max(2, ry - 18) + 8);
+        ctx.restore();
+      }
+
+      // 3. Paint Dashed Marked Target Box
+      const noteNum = noteObj.number || (state.notes.length + 1);
+      if (mr && typeof mr.x === 'number') {
+        const bx = mapX(mr.x);
+        const by = mapY(mr.y);
+        const bw = Math.max(18, (mr.w || 40) * effScale);
+        const bh = Math.max(18, (mr.h || 32) * effScale);
+        ctx.save();
+        ctx.fillStyle = 'rgba(249, 115, 22, 0.12)';
+        ctx.fillRect(bx, by, bw, bh);
+        ctx.setLineDash([6, 4]);
+        ctx.strokeStyle = '#f97316';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(bx, by, bw, bh);
+        ctx.setLineDash([]);
+
+        if (!arrows.length) {
+          ctx.beginPath();
+          ctx.arc(bx + bw, by, 11, 0, Math.PI * 2);
+          ctx.fillStyle = '#f97316';
+          ctx.fill();
+          ctx.lineWidth = 1.6;
+          ctx.strokeStyle = '#141312';
+          ctx.stroke();
+          ctx.fillStyle = '#141312';
+          ctx.font = '800 10.5px Inter, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(`#${noteNum}`, bx + bw, by + 0.5);
+        }
+        ctx.restore();
+      }
+
+      // 4. Paint Directional Vector Arrows (Reference Image -> Target UI)
+      arrows.forEach((ar, idx) => {
+        drawCanvasVectorArrow(
+          ctx,
+          mapX(ar.x1),
+          mapY(ar.y1),
+          mapX(ar.x2),
+          mapY(ar.y2),
+          idx === 0 ? `#${noteNum}` : ''
+        );
+      });
+
+      // 5. Paint Callout Banner Footer with Target Metadata + Note Text
+      ctx.fillStyle = '#1c1b19';
+      ctx.fillRect(0, sceneH, sceneW, footerH);
+      ctx.fillStyle = '#f97316';
+      ctx.fillRect(0, sceneH, sceneW, 2);
+
+      const taskBadge = String(noteObj.taskType || state.noteTaskType || 'fix').toUpperCase();
+      const targetStr = `${noteObj.sectionLabel ? noteObj.sectionLabel + ' · ' : ''}${noteObj.selector || 'Marked Region'}`;
+      ctx.fillStyle = '#fb923c';
+      ctx.font = '700 11.5px "JetBrains Mono", Consolas, monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(`NOTE #${noteNum} [${taskBadge}] -> ${targetStr}`, 14, sceneH + 10);
+
+      const rawNote = String(noteObj.text || ($('notePopupInput')?.value || '').trim() || '(Visual arrow/region note)').replace(/\s+/g, ' ');
+      ctx.fillStyle = '#f5f5f4';
+      ctx.font = '500 12.5px Inter, sans-serif';
+      const maxLineW = sceneW - 28;
+      const words = rawNote.split(' ');
+      let line1 = '';
+      let line2 = '';
+      for (const w of words) {
+        const test = line1 ? `${line1} ${w}` : w;
+        if (!line2 && ctx.measureText(test).width <= maxLineW) {
+          line1 = test;
+        } else {
+          const test2 = line2 ? `${line2} ${w}` : w;
+          if (ctx.measureText(test2).width <= maxLineW - 18) line2 = test2;
+          else {
+            line2 += '…';
+            break;
+          }
+        }
+      }
+      ctx.fillText(line1, 14, sceneH + 32);
+      if (line2) ctx.fillText(line2, 14, sceneH + 52);
+
+      return canvas.toDataURL('image/png');
+    } catch (err) {
+      console.warn('[Vectora Canvas] renderNoteCompositePng error:', err);
+      return '';
+    }
+  }
+
+  let notePreviewTimer = null;
+  function updateNotePopupPreviewImage() {
+    clearTimeout(notePreviewTimer);
+    notePreviewTimer = setTimeout(async () => {
+      if (!state.editingNote || $('notePopup')?.hidden) return;
+      const draft = {
+        ...state.editingNote,
+        taskType: state.noteTaskType,
+        text: ($('notePopupInput')?.value || '').trim() || state.editingNote.text || ''
+      };
+      const dataUrl = await renderNoteCompositePng(draft);
+      if (!dataUrl || !state.editingNote) return;
+      state.editingNote.noteImageDataUrl = dataUrl;
+      const wrap = $('notePopupImgPreviewWrap');
+      const img = $('notePopupImgPreview');
+      if (wrap && img) {
+        img.src = dataUrl;
+        wrap.hidden = false;
+      }
+      if ($('btnNoteClearArrows')) {
+        $('btnNoteClearArrows').hidden = !(Array.isArray(state.editingNote.arrows) && state.editingNote.arrows.length > 0);
+      }
+    }, 60);
+  }
+
   function getNotesForCurrentEntry() {
     return (state.notes || []).filter((n) => !n.entry || n.entry === state.entry);
   }
@@ -2696,6 +4273,12 @@
       `### Note #${num} [${String(n.taskType || 'fix').toUpperCase()}] — Page: \`${n.entry || state.entry || 'index.html'}\``,
       `- **Marked Area**: ${areaLine}`
     ];
+    if (n.noteImagePath) {
+      lines.push(`- **Visual Note Image (Inspect via read_file)**: \`${n.noteImagePath}\``);
+    }
+    if (Array.isArray(n.arrows) && n.arrows.length > 0) {
+      lines.push(`- **Directional Arrows**: ${n.arrows.map((a) => `(${a.x1}, ${a.y1}) -> (${a.x2}, ${a.y2})`).join('; ')}`);
+    }
     if (n.sectionLabel) lines.push(`- **Section**: \`${n.sectionLabel}\``);
     if (n.selector) lines.push(`- **Primary Target**: \`${n.selector}\` (<${n.elementTag || 'div'}>)`);
     if (Array.isArray(n.enclosedElements) && n.enclosedElements.length > 0) {
@@ -2749,13 +4332,15 @@
     const list = $('notesDrawerList');
     list.innerHTML = '';
     if (!cnt) {
-      list.innerHTML = '<div class="empty-note">Select Note tool (N) and drag on any UI area — or click + New — to attach Coding Agent instructions outside HTML.</div>';
+      list.innerHTML = '<div class="empty-note">Select Note tool (N) — use Area Box or Arrow from a pasted reference image — to send visual PNG notes to your Coding Agent.</div>';
     } else {
       for (const n of state.notes) {
         const mr = n.markRect || {};
+        const arrowBadge = Array.isArray(n.arrows) && n.arrows.length ? ` · ${n.arrows.length} arrow${n.arrows.length > 1 ? 's' : ''}` : '';
         const coordsLabel = typeof mr.x === 'number'
-          ? `Marked: X:${mr.x}, Y:${mr.y} · ${mr.w}×${mr.h}px${Array.isArray(n.enclosedElements) && n.enclosedElements.length ? ` · ${n.enclosedElements.length} el` : ''}`
+          ? `Marked: X:${mr.x}, Y:${mr.y} · ${mr.w}×${mr.h}px${arrowBadge}`
           : '';
+        const thumbSrc = n.noteImageUrl || n.noteImageDataUrl || '';
         const card = document.createElement('div');
         card.className = 'nd-card' + (state.editingNote && state.editingNote.id === n.id ? ' active' : '');
         card.innerHTML = `
@@ -2765,6 +4350,7 @@
           </div>
           <div class="nd-card-sel">${escapeHtml(n.sectionLabel ? `${n.sectionLabel} · ${n.selector || 'region'}` : (n.selector || 'region'))}</div>
           ${coordsLabel ? `<div class="nd-card-coords">${escapeHtml(coordsLabel)}</div>` : ''}
+          ${thumbSrc ? `<img class="nd-card-thumb" src="${escapeHtml(thumbSrc)}" alt="Note #${escapeHtml(n.number)} Visual PNG">` : ''}
           <div>${escapeHtml(n.text)}</div>
         `;
         card.addEventListener('mouseenter', () => {
@@ -2792,29 +4378,39 @@
       clearPending: !$('notePopup') || $('notePopup').hidden,
       activeNoteId: state.editingNote?.id || null
     });
+    renderWorkspaceAnnotSvg();
   }
 
   function closeNotePopup() {
     state.editingNote = null;
+    state.addingArrowToEditingNote = false;
     $('notePopup').hidden = true;
+    if ($('notePopupImgPreviewWrap')) $('notePopupImgPreviewWrap').hidden = true;
+    syncNoteArrowCaptureLayer();
     postToBridge('clear_pending_note_mark', { clearHighlight: true });
     renderNotesUI();
   }
 
   function openNotePopup(noteObj) {
     state.editingNote = noteObj;
+    state.addingArrowToEditingNote = false;
+    syncNoteArrowCaptureLayer();
     state.noteTaskType = noteObj.taskType || 'fix';
     const secPrefix = noteObj.sectionLabel ? `${noteObj.sectionLabel} ▸ ` : '';
     $('notePopupTarget').textContent = `Target: ${secPrefix}${noteObj.selector || noteObj.elementTag || 'Marked Region'}`;
     const mr = noteObj.markRect;
     const encCount = Array.isArray(noteObj.enclosedElements) ? noteObj.enclosedElements.length : 0;
+    const arrowCnt = Array.isArray(noteObj.arrows) ? noteObj.arrows.length : 0;
     if ($('notePopupCoords')) {
       $('notePopupCoords').textContent = mr && typeof mr.x === 'number'
-        ? `Marked Area: X:${mr.x}, Y:${mr.y} · ${mr.w} × ${mr.h} px${encCount ? ` · ${encCount} item${encCount === 1 ? '' : 's'}` : ''}`
+        ? `Marked Area: X:${mr.x}, Y:${mr.y} · ${mr.w} × ${mr.h} px${arrowCnt ? ` · ${arrowCnt} Arrow${arrowCnt === 1 ? '' : 's'}` : ''}${encCount ? ` · ${encCount} el` : ''}`
         : 'Marked Area: Selected Element';
     }
     $('notePopupInput').value = noteObj.text || '';
     $('btnDeleteNote').hidden = !noteObj.id;
+    if ($('btnNoteClearArrows')) {
+      $('btnNoteClearArrows').hidden = arrowCnt < 1;
+    }
     document.querySelectorAll('#noteTypeGroup .np-type').forEach((b) => {
       b.classList.toggle('active', b.getAttribute('data-ntype') === state.noteTaskType);
     });
@@ -2822,6 +4418,8 @@
       postToBridge('focus_note_mark', { id: noteObj.id });
     }
     $('notePopup').hidden = false;
+    renderWorkspaceAnnotSvg();
+    updateNotePopupPreviewImage();
     $('notePopupInput').focus();
   }
 
@@ -2842,11 +4440,18 @@
   }
 
   async function saveActiveNote() {
-    const txt = $('notePopupInput').value.trim();
-    if (!txt || !state.editingNote) {
+    if (!state.editingNote) {
       closeNotePopup();
       return;
     }
+    const rawTxt = $('notePopupInput').value.trim();
+    const hasArrows = Array.isArray(state.editingNote.arrows) && state.editingNote.arrows.length > 0;
+    const txt = rawTxt || (hasArrows ? 'Match pointed reference design / fix indicated element' : '');
+    if (!txt) {
+      closeNotePopup();
+      return;
+    }
+
     // Always ensure Note regions & pins are visible on the artboard after saving a note!
     if (!state.showNotes) {
       state.showNotes = true;
@@ -2855,18 +4460,23 @@
     }
 
     let savedNum = state.editingNote.number || (state.notes.length + 1);
+    const noteDraftWithText = {
+      ...state.editingNote,
+      number: savedNum,
+      entry: state.editingNote.entry || state.entry,
+      taskType: state.noteTaskType,
+      text: txt
+    };
+    const noteImageDataUrl = await renderNoteCompositePng(noteDraftWithText);
+    noteDraftWithText.noteImageDataUrl = noteImageDataUrl;
+
     if (state.hasServerBackend && !state.vfsMode) {
       const resp = await fetch('/__vc_api/notes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: 'upsert',
-          note: {
-            ...state.editingNote,
-            entry: state.editingNote.entry || state.entry,
-            taskType: state.noteTaskType,
-            text: txt
-          }
+          note: noteDraftWithText
         })
       });
       const json = await resp.json();
@@ -2882,32 +4492,30 @@
         savedNum = state.notes[existingIdx].number;
         state.notes[existingIdx] = {
           ...state.notes[existingIdx],
-          ...state.editingNote,
-          entry: state.editingNote.entry || state.entry,
-          taskType: state.noteTaskType,
-          text: txt,
+          ...noteDraftWithText,
+          number: savedNum,
           updatedAt: new Date().toISOString()
         };
       } else {
         const nextNum = state.notes.reduce((m, n) => Math.max(m, Number(n.number) || 0), 0) + 1;
         savedNum = nextNum;
         state.notes.push({
-          ...state.editingNote,
+          ...noteDraftWithText,
           id: `note_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
           number: nextNum,
-          entry: state.entry,
-          taskType: state.noteTaskType,
-          text: txt,
           createdAt: new Date().toISOString()
         });
       }
       persistStandaloneNotesToStorage();
     }
     state.editingNote = null;
+    state.addingArrowToEditingNote = false;
     $('notePopup').hidden = true;
+    if ($('notePopupImgPreviewWrap')) $('notePopupImgPreviewWrap').hidden = true;
+    syncNoteArrowCaptureLayer();
     postToBridge('clear_pending_note_mark', { clearHighlight: false });
     renderNotesUI();
-    showToast(`Saved Note #${savedNum} + Marked Area for Coding Agent`);
+    showToast(`Saved Visual PNG Note #${savedNum} for Coding Agent`);
   }
 
   async function persistPreferences() {
@@ -2940,6 +4548,9 @@
     { label: 'Flow Div Spacer Tool (D)', run: () => setActiveTool('div') },
     { label: 'Type Tool — Direct In-Group Text Edit (T)', run: () => setActiveTool('text') },
     { label: 'Eyedropper — Pick Fill, Gradient & Stroke (I)', run: () => setActiveTool('eyedropper') },
+    { label: 'Note Arrow Mode — Point Reference Image to Design (N)', run: () => { setActiveTool('note'); setNoteSubMode('arrow'); } },
+    { label: 'Import Reference Design Image (Ctrl+V / + Image)', run: () => $('refImgFileInput')?.click() },
+    { label: 'Clear All Figma Ruler Guides', run: () => { state.userGuides = []; state.selectedGuideId = null; persistUserGuidesToStorage(); syncGuidesToBridge(); renderUserGuidesUI(); renderRulers(); showToast('Cleared all guides'); } },
     { label: 'Unfill / No Paint on Active Fill or Stroke (/)', run: () => applyUnfillToActiveProxy() },
     { label: 'Open Web Effects Panel (Drop Shadow, Blur, Glow, Glass)', run: () => openEffectsPopover($('btnEffectsPopover')) },
     { label: 'Exit Group Isolation Mode (Esc)', run: () => postToBridge('exit_isolation', { exitAll: false }) },
@@ -3015,7 +4626,14 @@
     $('workspaceRoot').classList.toggle('live-mode', state.mode === 'live');
     if (state.mode === 'live') closeEffectsPopover();
     if ($('effectsControlBar')) $('effectsControlBar').hidden = state.mode !== 'edit';
+    if ($('noteSubbar')) $('noteSubbar').hidden = state.mode !== 'edit' || state.tool !== 'note';
     syncHostCanvasCursor();
+    syncRulersVisibility();
+    renderRulers();
+    renderUserGuidesUI();
+    renderRefImagesUI();
+    renderWorkspaceAnnotSvg();
+    syncNoteArrowCaptureLayer();
     postToBridge('set_mode', { mode: state.mode });
     setTimeout(updateMinimap, 60);
   }
@@ -3025,13 +4643,18 @@
     if (toolName === 'select' || toolName === 'direct') {
       state.lastSelectionTool = toolName;
     }
+    if (toolName !== 'note') {
+      state.addingArrowToEditingNote = false;
+    }
     document.querySelectorAll('#aiToolbar .ai-tool').forEach((b) => {
       b.classList.toggle('active', b.getAttribute('data-tool') === toolName);
     });
     $('activeToolBadge').textContent = TOOL_NAMES[toolName] || toolName;
     $('shapeSubbar').hidden = toolName !== 'shape';
+    if ($('noteSubbar')) $('noteSubbar').hidden = state.mode !== 'edit' || toolName !== 'note';
     syncTopCornerControlBar();
     syncHostCanvasCursor();
+    syncNoteArrowCaptureLayer();
     postToBridge('set_tool', { tool: toolName, shapeKind: state.shapeKind, shapeRadius: state.shapeRadius });
   }
 
@@ -3432,20 +5055,38 @@
     let downloadName;
     if ((textKeys.length > 1 || binKeys.length > 0 || state.notes.length > 0) && codeSync && typeof codeSync.buildZipUint8Array === 'function') {
       const filesForExport = { ...state.projectFiles };
+      const exportBinaryAssets = { ...(state.binaryAssets || {}) };
       if (state.notes.length > 0) {
+        const cleanExportNotes = state.notes.map((n, idx) => {
+          const num = n.number || idx + 1;
+          const relPng = `.vectora-notes/note_${num}.png`;
+          const rawUrl = n.noteImageDataUrl || '';
+          const m = rawUrl.match(/^data:image\/png;base64,([A-Za-z0-9+/=]+)$/);
+          if (m) {
+            try {
+              const binStr = atob(m[1]);
+              const bytes = new Uint8Array(binStr.length);
+              for (let i = 0; i < binStr.length; i++) bytes[i] = binStr.charCodeAt(i);
+              exportBinaryAssets[relPng] = bytes;
+            } catch (_) {}
+          }
+          const copy = { ...n, exportedNoteImage: exportBinaryAssets[relPng] ? relPng : (n.noteImagePath || '') };
+          delete copy.noteImageDataUrl;
+          return copy;
+        });
         filesForExport['.vectora-notes.json'] = JSON.stringify(
           {
             skillName: 'vectora-canvas',
             notPartOfDesign: true,
             projectName: state.projectName,
             agentBrief: formatAllNotesForCodingAgent(state.notes),
-            notes: state.notes
+            notes: cleanExportNotes
           },
           null,
           2
         );
       }
-      const zipBytes = codeSync.buildZipUint8Array(filesForExport, state.binaryAssets);
+      const zipBytes = codeSync.buildZipUint8Array(filesForExport, exportBinaryAssets);
       blob = new Blob([zipBytes], { type: 'application/zip' });
       downloadName = `${slug}.zip`;
     } else {
@@ -4147,10 +5788,15 @@
 
     $('chkSmartGuides').addEventListener('change', (ev) => {
       state.smartGuides = ev.target.checked;
+      syncRulersVisibility();
+      syncGuidesToBridge();
+      renderRulers();
+      renderUserGuidesUI();
       postToBridge('set_prefs', { smartGuides: state.smartGuides });
     });
     $('chkShowNotes').addEventListener('change', (ev) => {
       state.showNotes = ev.target.checked;
+      renderWorkspaceAnnotSvg();
       postToBridge('set_prefs', { showNotes: state.showNotes });
     });
 
@@ -4334,6 +5980,11 @@
     $('btnCancelNote').addEventListener('click', closeNotePopup);
     $('btnSaveNote').addEventListener('click', saveActiveNote);
     if ($('notePopupInput')) {
+      let previewDebounceTimer = null;
+      $('notePopupInput').addEventListener('input', () => {
+        clearTimeout(previewDebounceTimer);
+        previewDebounceTimer = setTimeout(() => updateNotePopupPreviewImage(), 120);
+      });
       $('notePopupInput').addEventListener('keydown', (ev) => {
         if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') {
           ev.preventDefault();
@@ -4464,14 +6115,37 @@
         ev.preventDefault();
         postToBridge('clipboard', { action: 'cut' });
       } else if (ctrl && k === 'v') {
-        ev.preventDefault();
-        postToBridge('clipboard', { action: 'paste' });
+        // Do NOT call preventDefault() so native OS clipboard image `paste` fires cleanly!
+        setTimeout(() => {
+          if (Date.now() - lastStudioPasteEventTs > 120) {
+            postToBridge('clipboard', { action: 'paste' });
+          }
+        }, 35);
       } else if (ctrl && k === 'd') {
         ev.preventDefault();
         postToBridge('clipboard', { action: 'duplicate' });
       } else if (ev.key === 'Delete' || ev.key === 'Backspace') {
         ev.preventDefault();
-        postToBridge('clipboard', { action: 'delete' });
+        if (state.selectedGuideId) {
+          const gid = state.selectedGuideId;
+          state.userGuides = state.userGuides.filter((g) => g.id !== gid);
+          state.selectedGuideId = null;
+          persistUserGuidesToStorage();
+          syncGuidesToBridge();
+          renderUserGuidesUI();
+          renderRulers();
+          showToast('Guide removed');
+        } else if (state.selectedRefImageId) {
+          const rid = state.selectedRefImageId;
+          state.refImages = state.refImages.filter((r) => r.id !== rid);
+          state.selectedRefImageId = null;
+          renderRefImagesUI();
+          renderWorkspaceAnnotSvg();
+          syncRefImageActionToServer('delete', { id: rid });
+          showToast('Removed reference image');
+        } else {
+          postToBridge('clipboard', { action: 'delete' });
+        }
       } else if (ev.shiftKey && k === 'x') {
         ev.preventDefault();
         swapFillAndStroke();
@@ -4499,6 +6173,17 @@
         $('prefsModal').hidden = true;
         $('shortcutsModal').hidden = true;
         closeFileDialog();
+        if (state.addingArrowToEditingNote) {
+          state.addingArrowToEditingNote = false;
+          syncNoteArrowCaptureLayer();
+          if (state.editingNote) $('notePopup').hidden = false;
+        }
+        if (state.selectedGuideId || state.selectedRefImageId) {
+          state.selectedGuideId = null;
+          state.selectedRefImageId = null;
+          renderUserGuidesUI();
+          renderRefImagesUI();
+        }
         if (state.isolation && state.isolation.active) {
           postToBridge('exit_isolation', { exitAll: false });
         } else {
@@ -4629,8 +6314,14 @@
           prefs: state.preferences,
           bypassEnabled: state.bypassGates,
           accelMode: state.effectiveAccel,
+          userGuides: state.smartGuides ? (state.userGuides || []) : [],
           notes: getNotesForCurrentEntry()
         });
+        syncGuidesToBridge();
+        renderRulers();
+        renderUserGuidesUI();
+        renderRefImagesUI();
+        renderWorkspaceAnnotSvg();
         postToBridge('set_bypass', { enabled: state.bypassGates });
         postToBridge('set_accel_mode', { accelMode: state.effectiveAccel });
         if (state.pendingHashTarget) {
@@ -4662,6 +6353,7 @@
         syncIsolationBarUI();
         renderSessionsAndLayers();
         populateInspectorFromSelection();
+        renderRulers();
         break;
       }
       case 'vc_history_state': {
@@ -4768,6 +6460,25 @@
         });
         break;
       }
+      case 'vc_iframe_cursor': {
+        state.rulerCursor = { artX: Number(msg.artX) || 0, artY: Number(msg.artY) || 0 };
+        renderRulers();
+        break;
+      }
+      case 'vc_iframe_paste_image': {
+        if (msg.dataUrl) {
+          importReferenceImageDataUrl(msg.dataUrl, msg.name || 'Pasted Image');
+        }
+        break;
+      }
+      case 'vc_note_point_inspected': {
+        const resolver = pendingNotePointResolvers.get(msg.requestId);
+        if (resolver) {
+          pendingNotePointResolvers.delete(msg.requestId);
+          resolver(msg);
+        }
+        break;
+      }
       case 'vc_open_note': {
         if (msg.note) openNotePopup(msg.note);
         break;
@@ -4852,6 +6563,15 @@
           }
         } catch (_) {}
       });
+      es.addEventListener('ref_images_updated', (ev) => {
+        try {
+          const data = JSON.parse(ev.data);
+          if (Array.isArray(data.refImages)) {
+            state.refImages = data.refImages;
+            renderRefImagesUI();
+          }
+        } catch (_) {}
+      });
       es.addEventListener('target_switched', (ev) => {
         try {
           const data = JSON.parse(ev.data);
@@ -4908,6 +6628,8 @@
     } catch (_) {}
 
     state.notes = loadStandaloneNotesFromStorage();
+    state.refImages = loadStandaloneRefImages();
+    state.userGuides = loadUserGuidesFromStorage();
     state.recentSessions = loadLocalRecentSessions();
     state.everEditedInSession = false;
 
@@ -4927,6 +6649,10 @@
     syncScaleModeUI();
     syncBypassButtonUI(false);
     syncAccelerationEngineUI();
+    syncRulersVisibility();
+    renderRulers();
+    renderUserGuidesUI();
+    renderRefImagesUI();
     renderNotesUI();
     renderGradientEditorUI();
     loadEntryIntoIframe(state.entry);
@@ -4955,6 +6681,8 @@
         state.preferences = { ...state.preferences, ...(data.preferences || {}) };
         state.ignoredWords = data.ignoredWords || [];
         state.notes = data.notes || [];
+        state.refImages = Array.isArray(data.refImages) ? data.refImages : [];
+        state.userGuides = loadUserGuidesFromStorage();
         state.everEditedInSession = false;
 
         try {
@@ -4984,6 +6712,10 @@
         syncScaleModeUI();
         syncBypassButtonUI(false);
         syncAccelerationEngineUI();
+        syncRulersVisibility();
+        renderRulers();
+        renderUserGuidesUI();
+        renderRefImagesUI();
         renderNotesUI();
         renderGradientEditorUI();
         loadEntryIntoIframe(state.entry);
@@ -5002,10 +6734,16 @@
   syncBypassButtonUI(false);
   syncHostCanvasCursor();
   wireUiControls();
+  wireRulersAndUserGuides();
+  wireReferenceImagesAndArrowCapture();
   wireMinimapAndOuterCanvasPanZoom();
   wireAllScrubbyNumberFields();
   wirePaintControls();
   wireCustomColorPopover();
   wireEffectsPopover();
+  window.addEventListener('resize', () => {
+    renderRulers();
+    renderUserGuidesUI();
+  });
   bootStudio();
 })();

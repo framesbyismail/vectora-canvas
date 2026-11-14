@@ -83,6 +83,7 @@
   let autoGroupButtons = true;
   let alignKeyMode = '__bounds__'; // '__artboard__' | '__bounds__' | '__key__'
   let transformRefPoint = 'c'; // nw | n | ne | w | c | e | sw | s | se
+  let userGuides = []; // [{ id, axis: 'h'|'v', pos: number }] in artboard px
 
   let prefs = {
     scaleStrokesAndEffects: true,
@@ -313,6 +314,20 @@
       html[data-vc-preview-unlocked="true"] .pro-only:not(.modal):not([role="dialog"]):not([hidden]),
       html[data-vc-preview-unlocked="true"] .pro-locked:not(.modal):not([role="dialog"]):not([hidden]) {
         display: block !important;
+      }
+      html[data-vc-preview-unlocked="true"] .field.pro-only:not([hidden]),
+      html[data-vc-preview-unlocked="true"] .row.pro-only:not([hidden]) {
+        display: flex !important;
+      }
+      html.__vc_edit_mode__ .off .dim:not([hidden]),
+      html.__vc_edit_mode__ .dim:not([hidden]),
+      html.__vc_edit_mode__ [data-vc-section]:not([hidden]),
+      html.__vc_edit_mode__ button[disabled]:not([hidden]),
+      html.__vc_edit_mode__ input[disabled]:not([hidden]),
+      html.__vc_edit_mode__ select[disabled]:not([hidden]),
+      html.__vc_edit_mode__ textarea[disabled]:not([hidden]),
+      html.__vc_edit_mode__ .tab.locked:not([hidden]) {
+        pointer-events: auto !important;
       }
       #__vc_overlay_root__ {
         position: fixed;
@@ -1043,6 +1058,7 @@
   function syncAuthoritativeStyleRules() {
     let tag = document.getElementById('__vc_authoritative_css__');
     const rules = [];
+    const relaxedParents = new Set();
     for (const [vcId, propMap] of patchedPropsByEl.entries()) {
       const el = getEl(vcId);
       if (!el || !propMap || !propMap.size) continue;
@@ -1055,15 +1071,23 @@
       if (!w && !h && !tr && !disp && !unfillFill && !unfillStroke) continue;
       const sel = computeCleanSelector(el);
       if (!sel) continue;
+      const hiSel = /^[#.\[]/.test(sel) && !/[\s>+~]/.test(sel)
+        ? `html body ${sel}${sel}${sel}`
+        : `html body ${sel}`;
       const decls = [];
       if (w || h) {
-        decls.push('box-sizing: border-box !important', 'flex-shrink: 0 !important');
+        decls.push(
+          'box-sizing: border-box !important',
+          'flex: 0 0 auto !important',
+          'flex-grow: 0 !important',
+          'flex-shrink: 0 !important'
+        );
       }
       if (w) {
-        decls.push(`width: ${w} !important`, 'max-width: none !important');
+        decls.push(`width: ${w} !important`, 'min-width: 0px !important', 'max-width: none !important');
       }
       if (h) {
-        decls.push(`height: ${h} !important`, `min-height: ${h} !important`, `max-height: ${h} !important`);
+        decls.push(`height: ${h} !important`, `min-height: 0px !important`, `max-height: ${h} !important`);
       }
       if (disp) {
         decls.push(`display: ${disp} !important`);
@@ -1078,7 +1102,56 @@
         decls.push('border: none !important', 'border-width: 0px !important');
       }
       if (decls.length) {
-        rules.push(`${sel} { ${decls.join('; ')}; }`);
+        rules.push(`${hiSel} { ${decls.join('; ')}; }`);
+      }
+
+      // Ensure resized cards & sub-sections adapt their inner flex bodies and parent wrappers smoothly!
+      if (h) {
+        if (el.classList && el.classList.contains('card')) {
+          rules.push(`${hiSel} > .cbody { flex: 1 1 auto !important; height: auto !important; min-height: 0px !important; max-height: none !important; }`);
+          const pTgroup = el.parentElement;
+          if (pTgroup && pTgroup.classList && pTgroup.classList.contains('tgroup')) {
+            const pId = idByEl.get(pTgroup);
+            if (!pId || !patchedPropsByEl.get(pId)?.get('height')) {
+              const pSel = computeCleanSelector(pTgroup);
+              if (pSel && !relaxedParents.has(pSel)) {
+                relaxedParents.add(pSel);
+                const hiPSel = /^[#.\[]/.test(pSel) && !/[\s>+~]/.test(pSel) ? `html body ${pSel}${pSel}` : `html body ${pSel}`;
+                rules.push(`${hiPSel} { flex: 0 0 auto !important; min-height: 0px !important; max-height: none !important; }`);
+              }
+            }
+          }
+        }
+        if (el.classList && (el.classList.contains('field') || el.hasAttribute('data-vc-section'))) {
+          rules.push(
+            `${hiSel} > .chips, ${hiSel} > textarea, ${hiSel} > .descbox, ${hiSel} > .fdetail, ${hiSel} > .fmulti { flex: 1 1 0 !important; min-height: 0px !important; max-height: none !important; }`
+          );
+        }
+        const pField = el.parentElement;
+        if (pField && pField.classList && pField.classList.contains('field')) {
+          const pfId = idByEl.get(pField);
+          if (!pfId || !patchedPropsByEl.get(pfId)?.get('height')) {
+            const pfSel = computeCleanSelector(pField);
+            if (pfSel && !relaxedParents.has(pfSel)) {
+              relaxedParents.add(pfSel);
+              const hiPfSel = /^[#.\[]/.test(pfSel) && !/[\s>+~]/.test(pfSel) ? `html body ${pfSel}${pfSel}` : `html body ${pfSel}`;
+              rules.push(`${hiPfSel} { flex: 0 0 auto !important; height: auto !important; min-height: 0px !important; max-height: none !important; }`);
+            }
+          }
+        }
+        const pCbody = el.closest && el.closest('.card > .cbody');
+        if (pCbody && pCbody !== el) {
+          const cardEl = pCbody.parentElement;
+          const cardId = cardEl ? idByEl.get(cardEl) : null;
+          if (cardEl && (!cardId || !patchedPropsByEl.get(cardId)?.get('height'))) {
+            const cSel = computeCleanSelector(cardEl);
+            if (cSel && !relaxedParents.has(cSel + '>.cbody')) {
+              relaxedParents.add(cSel + '>.cbody');
+              const hiCSel = /^[#.\[]/.test(cSel) && !/[\s>+~]/.test(cSel) ? `html body ${cSel}${cSel}` : `html body ${cSel}`;
+              rules.push(`${hiCSel} > .cbody { height: auto !important; min-height: 0px !important; max-height: none !important; }`);
+            }
+          }
+        }
       }
     }
     if (!rules.length) {
@@ -1842,18 +1915,19 @@
       });
     }
 
-    // 2. Created shapes & flow divs + all selectable interactive / text / layout elements
+    // 2. Created shapes & flow divs + all selectable interactive / text / layout / sub-section elements
     const candidates = document.querySelectorAll(
-      '[data-vc-created], .card, header, nav, section, article, aside, footer, button, a, input, select, textarea, label, h1, h2, h3, h4, h5, h6, p, span, strong, img, svg, canvas, div, .vc-flow-div, .vc-shape'
+      '[data-vc-created], [data-name], [data-vc-section], .card, header, nav, section, article, aside, footer, .field, .chips, .sl, .seg, .fdetail, .fmulti, .subj-row, .row, button, a, input, select, textarea, label, h1, h2, h3, h4, h5, h6, p, span, strong, img, svg, canvas, div, .vc-flow-div, .vc-shape'
     );
     const added = new Set();
     candidates.forEach((el) => {
-      if (layers.length >= 280) return;
+      if (layers.length >= 1200) return;
       if (isBridgeNode(el)) return;
       const vcId = ensureVcId(el);
       if (!vcId || added.has(vcId)) return;
       const isSel = selectedIds.includes(vcId);
       if (!isSel && isStructuralGridWrapper(el)) return;
+      if (!isSel && isPureTransparentLayoutWrapper(el)) return;
       if (!isSel && el.tagName === 'SPAN' && autoGroupButtons && el.closest('button, a')) return;
       const r = el.getBoundingClientRect();
       const locked = lockedIds.has(vcId);
@@ -2161,13 +2235,88 @@
     return !bgHex && !hasBgImg && !hasBorder && !hasShadow && !hasDirectNonEmptyText(el);
   }
 
+  const SUBSECTION_CLASS_OR_TAG_SEL = [
+    '[data-name]',
+    '[data-vc-section]',
+    '.field',
+    '.chips',
+    '.sl',
+    '.seg',
+    '.fdetail',
+    '.fmulti',
+    '.descbox',
+    '.lightwrap',
+    '.mrow',
+    '.xyz',
+    '.subj-row',
+    '.row',
+    '.card-head',
+    '.shead',
+    '.gen-split-row',
+    '.genbox',
+    '.psave',
+    '.pgroup',
+    '.vf-toggles',
+    '.vf-subj-detail',
+    '.upscale-dropzone',
+    '.vpd-section',
+    '.panel-sec',
+    '.sub-card',
+    '.form-group',
+    '.input-group',
+    'fieldset',
+    'section',
+    'article',
+    'aside',
+    'header',
+    'footer',
+    '[role="group"]',
+    '[role="region"]',
+    '[role="tabpanel"]'
+  ].join(', ');
+
+  function isSelectableSubSection(el) {
+    if (!el || el.nodeType !== 1) return false;
+    if (el.hasAttribute('data-vc-created') || el.classList.contains('vc-shape') || el.classList.contains('vc-flow-div')) return true;
+    if (el.id && !el.id.startsWith('vc_') && !el.id.startsWith('__vc_') && !isStructuralGridWrapper(el)) {
+      if ((el.classList.contains('cbody') || el.classList.contains('tgroup')) && !el.hasAttribute('data-name') && !el.hasAttribute('data-vc-section')) {
+        return false;
+      }
+      return true;
+    }
+    try {
+      if (el.matches(SUBSECTION_CLASS_OR_TAG_SEL)) return true;
+    } catch (_) {}
+    return false;
+  }
+
   function isPureTransparentLayoutWrapper(el) {
     if (!el || el.nodeType !== 1 || el.tagName.toUpperCase() !== 'DIV') return false;
-    if (el.hasAttribute('data-vc-created') || el.classList.contains('vc-shape') || el.classList.contains('vc-flow-div')) return false;
+    if (
+      (el.classList.contains('labrow') || (el.classList.contains('top') && el.parentElement?.classList?.contains('sl'))) &&
+      !el.hasAttribute('data-name') &&
+      !el.hasAttribute('data-vc-section') &&
+      !el.hasAttribute('data-vc-created')
+    ) {
+      return true;
+    }
+    if (isSelectableSubSection(el)) return false;
     if (el.children.length === 0) return false;
     if (!isVisuallyTransparentDiv(el)) return false;
     const cs = getComputedStyle(el);
     if (cs.position === 'absolute' || cs.position === 'fixed') return false;
+    if (!el.classList.contains('cbody') && !el.classList.contains('tgroup') && !el.classList.contains('dropzone')) {
+      const parentCard = el.closest('.card, section, aside, article');
+      if (parentCard && parentCard !== el) {
+        const er = el.getBoundingClientRect();
+        const pr = parentCard.getBoundingClientRect();
+        const cardArea = Math.max(1, pr.width * pr.height);
+        const elArea = er.width * er.height;
+        if (er.width >= 36 && er.height >= 18 && elArea < cardArea * 0.82) {
+          return false;
+        }
+      }
+    }
     return true;
   }
 
@@ -2395,10 +2544,10 @@
       pushCandidate(h);
     }
 
-    // 2. Also include any visible element whose bounding box contains (clientX, clientY) (e.g. pointer-events:none or occluded canvas/div)
+    // 2. Also include any visible element whose bounding box contains (clientX, clientY) (e.g. pointer-events:none or occluded canvas/div/sub-section)
     if (document.body) {
       const extras = [];
-      document.body.querySelectorAll('[data-vc-created], .vc-shape, .vc-flow-div, button, input, select, textarea, a, img, canvas, h1, h2, h3, h4, p, .card, div[id]').forEach((el) => {
+      document.body.querySelectorAll('[data-vc-created], [data-name], [data-vc-section], .vc-shape, .vc-flow-div, .field, .chips, .sl, .seg, .fdetail, .fmulti, .subj-row, .row, button, input, select, textarea, a, img, canvas, h1, h2, h3, h4, p, .card, div[id]').forEach((el) => {
         if (isBridgeNode(el) || !isElementVisible(el)) return;
         const r = el.getBoundingClientRect();
         if (clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom) {
@@ -3706,6 +3855,62 @@
     };
   }
 
+  function collectMagneticSnapTargets() {
+    const br = document.body
+      ? document.body.getBoundingClientRect()
+      : { left: 0, top: 0, right: artboardWidth, bottom: artboardHeight, width: artboardWidth, height: artboardHeight };
+    const xTargets = [
+      { pos: br.left, y1: br.top, y2: br.bottom, priority: 2 },
+      { pos: (br.left + br.right) / 2, y1: br.top, y2: br.bottom, priority: 2 },
+      { pos: br.right, y1: br.top, y2: br.bottom, priority: 2 }
+    ];
+    const yTargets = [
+      { pos: br.top, x1: br.left, x2: br.right, priority: 2 },
+      { pos: (br.top + br.bottom) / 2, x1: br.left, x2: br.right, priority: 2 },
+      { pos: br.bottom, x1: br.left, x2: br.right, priority: 2 }
+    ];
+
+    if (Array.isArray(userGuides)) {
+      for (const g of userGuides) {
+        if (!g || typeof g.pos !== 'number') continue;
+        if (g.axis === 'v') {
+          xTargets.push({ pos: br.left + g.pos, y1: br.top - 40, y2: br.bottom + 40, priority: 0, isUserGuide: true });
+        } else if (g.axis === 'h') {
+          yTargets.push({ pos: br.top + g.pos, x1: br.left - 40, x2: br.right + 40, priority: 0, isUserGuide: true });
+        }
+      }
+    }
+
+    if (document.body) {
+      const selEls = selectedIds.map(getEl).filter(Boolean);
+      const parents = new Set(selEls.map((el) => el.parentElement).filter(Boolean));
+      const peerSet = new Set();
+      parents.forEach((p) => {
+        Array.from(p.children || []).forEach((ch) => peerSet.add(ch));
+      });
+      document.body.querySelectorAll('.card, nav, header, footer, [data-name], [data-vc-section], [data-vc-created]').forEach((el) => peerSet.add(el));
+
+      for (const peer of peerSet) {
+        if (!peer || isBridgeNode(peer) || !isElementVisible(peer) || isStructuralGridWrapper(peer)) continue;
+        if (selEls.some((s) => s === peer || s.contains(peer) || peer.contains(s))) continue;
+        const r = peer.getBoundingClientRect();
+        if (r.width < 8 || r.height < 8) continue;
+        xTargets.push(
+          { pos: r.left, y1: r.top, y2: r.bottom, priority: 1 },
+          { pos: (r.left + r.right) / 2, y1: r.top, y2: r.bottom, priority: 1 },
+          { pos: r.right, y1: r.top, y2: r.bottom, priority: 1 }
+        );
+        yTargets.push(
+          { pos: r.top, x1: r.left, x2: r.right, priority: 1 },
+          { pos: (r.top + r.bottom) / 2, x1: r.left, x2: r.right, priority: 1 },
+          { pos: r.bottom, x1: r.left, x2: r.right, priority: 1 }
+        );
+      }
+    }
+
+    return { br, xTargets, yTargets };
+  }
+
   function updateMoveDrag(ev) {
     const act = pointerAction;
     let dx = ev.clientX - act.startX;
@@ -3719,13 +3924,53 @@
     }
 
     const guides = [];
-    if (showSmartGuides && act.startBounds && document.body) {
-      const br = document.body.getBoundingClientRect();
-      const candCx = (act.startBounds.left + act.startBounds.right) / 2 + dx;
-      const artCx = (br.left + br.right) / 2;
-      if (Math.abs(candCx - artCx) <= 5) {
-        dx += artCx - candCx;
-        guides.push({ x: artCx, y: br.top, w: 1, h: br.height });
+    if (showSmartGuides && !ev.ctrlKey && act.startBounds && document.body) {
+      const { xTargets, yTargets } = collectMagneticSnapTargets();
+      const thresh = Math.max(4.5, Math.min(10, 6.5 / Math.max(0.25, hostZoom || 1)));
+      const sb = act.startBounds;
+
+      const candXs = [sb.left + dx, (sb.left + sb.right) / 2 + dx, sb.right + dx];
+      let bestX = null;
+      for (const cx of candXs) {
+        for (const t of xTargets) {
+          const lim = t.isUserGuide ? thresh * 1.2 : thresh;
+          const dist = Math.abs(cx - t.pos);
+          if (dist <= lim) {
+            if (!bestX || dist + t.priority * 0.35 < bestX.score) {
+              bestX = { delta: t.pos - cx, target: t, dist, score: dist + t.priority * 0.35 };
+            }
+          }
+        }
+      }
+      if (bestX) {
+        dx += bestX.delta;
+        const nTop = sb.top + dy;
+        const nBot = sb.bottom + dy;
+        const y1 = Math.min(nTop, bestX.target.y1);
+        const y2 = Math.max(nBot, bestX.target.y2);
+        guides.push({ x: bestX.target.pos, y: y1, w: 1.5, h: Math.max(8, y2 - y1) });
+      }
+
+      const candYs = [sb.top + dy, (sb.top + sb.bottom) / 2 + dy, sb.bottom + dy];
+      let bestY = null;
+      for (const cy of candYs) {
+        for (const t of yTargets) {
+          const lim = t.isUserGuide ? thresh * 1.2 : thresh;
+          const dist = Math.abs(cy - t.pos);
+          if (dist <= lim) {
+            if (!bestY || dist + t.priority * 0.35 < bestY.score) {
+              bestY = { delta: t.pos - cy, target: t, dist, score: dist + t.priority * 0.35 };
+            }
+          }
+        }
+      }
+      if (bestY) {
+        dy += bestY.delta;
+        const nLeft = sb.left + dx;
+        const nRight = sb.right + dx;
+        const x1 = Math.min(nLeft, bestY.target.x1);
+        const x2 = Math.max(nRight, bestY.target.x2);
+        guides.push({ x: x1, y: bestY.target.pos, w: Math.max(8, x2 - x1), h: 1.5 });
       }
     }
 
@@ -4008,20 +4253,22 @@
     it.el.style.width = wVal;
     it.el.style.height = hVal;
     it.el.style.minWidth = '0px';
+    it.el.style.minHeight = '0px';
     it.el.style.maxWidth = 'none';
     it.el.style.maxHeight = 'none';
+    it.el.style.flex = '0 0 auto';
     it.el.style.flexShrink = '0';
     recordPatchedProp(it.el, 'box-sizing', 'border-box');
     recordPatchedProp(it.el, 'width', wVal);
     recordPatchedProp(it.el, 'height', hVal);
+    recordPatchedProp(it.el, 'min-width', '0px');
+    recordPatchedProp(it.el, 'min-height', '0px');
     recordPatchedProp(it.el, 'max-width', 'none');
     recordPatchedProp(it.el, 'max-height', 'none');
+    recordPatchedProp(it.el, 'flex', '0 0 auto');
     recordPatchedProp(it.el, 'flex-shrink', '0');
 
-    if (it.isFlowDiv) {
-      it.el.style.flex = '0 0 auto';
-      recordPatchedProp(it.el, 'flex', '0 0 auto');
-    } else {
+    if (!it.isFlowDiv) {
       applyElementPositionOffset(it.el, newTx, newTy, it.origRot);
     }
 
@@ -4047,8 +4294,8 @@
 
   function updateResizeDrag(ev) {
     const act = pointerAction;
-    const dx = ev.clientX - act.startX;
-    const dy = ev.clientY - act.startY;
+    let dx = ev.clientX - act.startX;
+    let dy = ev.clientY - act.startY;
     if (!act.moved && Math.hypot(dx, dy) < 1.5) return;
     act.moved = true;
 
@@ -4056,6 +4303,52 @@
     const sb = act.startBounds;
     const affectsW = dir.includes('e') || dir.includes('w');
     const affectsH = dir.includes('n') || dir.includes('s');
+
+    const guides = [];
+    if (showSmartGuides && !ev.ctrlKey && !ev.altKey && sb) {
+      const { xTargets, yTargets } = collectMagneticSnapTargets();
+      const thresh = Math.max(4.5, Math.min(10, 6.5 / Math.max(0.25, hostZoom || 1)));
+      if (affectsW) {
+        const candEdgeX = dir.includes('e') ? sb.right + dx : sb.left + dx;
+        let bestX = null;
+        for (const t of xTargets) {
+          const lim = t.isUserGuide ? thresh * 1.2 : thresh;
+          const dist = Math.abs(candEdgeX - t.pos);
+          if (dist <= lim && (!bestX || dist + t.priority * 0.35 < bestX.score)) {
+            bestX = { delta: t.pos - candEdgeX, target: t, score: dist + t.priority * 0.35 };
+          }
+        }
+        if (bestX) {
+          dx += bestX.delta;
+          guides.push({
+            x: bestX.target.pos,
+            y: Math.min(sb.top, bestX.target.y1),
+            w: 1.5,
+            h: Math.max(8, Math.max(sb.bottom, bestX.target.y2) - Math.min(sb.top, bestX.target.y1))
+          });
+        }
+      }
+      if (affectsH) {
+        const candEdgeY = dir.includes('s') ? sb.bottom + dy : sb.top + dy;
+        let bestY = null;
+        for (const t of yTargets) {
+          const lim = t.isUserGuide ? thresh * 1.2 : thresh;
+          const dist = Math.abs(candEdgeY - t.pos);
+          if (dist <= lim && (!bestY || dist + t.priority * 0.35 < bestY.score)) {
+            bestY = { delta: t.pos - candEdgeY, target: t, score: dist + t.priority * 0.35 };
+          }
+        }
+        if (bestY) {
+          dy += bestY.delta;
+          guides.push({
+            x: Math.min(sb.left, bestY.target.x1),
+            y: bestY.target.pos,
+            w: Math.max(8, Math.max(sb.right, bestY.target.x2) - Math.min(sb.left, bestY.target.x1)),
+            h: 1.5
+          });
+        }
+      }
+    }
 
     let sx = 1;
     let sy = 1;
@@ -4094,9 +4387,7 @@
           offsetX = -dw / 2;
           offsetY = -dh / 2;
         } else {
-          // Dragging left ('w'): right edge stays fixed -> shift left by -dw
           if (dir.includes('w')) offsetX = -dw;
-          // Dragging top ('n'): bottom edge stays fixed -> grows upward by -dh!
           if (dir.includes('n')) offsetY = -dh;
         }
 
@@ -4136,7 +4427,8 @@
       }
     }
 
-    renderOverlays();
+    syncAuthoritativeStyleRules();
+    renderOverlays({ guides });
   }
 
   function finishResizeDrag(act) {
@@ -6251,6 +6543,16 @@
 
     if (mode !== 'edit') return;
 
+    // Report live cursor coordinate on artboard for Figma top/left rulers
+    if (document.body) {
+      const br = document.body.getBoundingClientRect();
+      sendToStudio({
+        type: 'vc_iframe_cursor',
+        artX: Math.round(ev.clientX - br.left),
+        artY: Math.round(ev.clientY - br.top)
+      });
+    }
+
     if (activeTool === 'div' && !ctrlHeld) {
       const ins = findFlowContainerInsertion(ev.clientX, ev.clientY);
       renderOverlays({ dropLine: ins.dropLine });
@@ -6287,14 +6589,7 @@
         handleIllustratorControlClick(ev, act.effectiveTool || 'select');
       } else if (act.containerEl) {
         const cEl = act.containerEl;
-        const isTransparentWrapper =
-          cEl.tagName === 'DIV' &&
-          !cEl.hasAttribute('data-vc-created') &&
-          !cEl.classList.contains('vc-shape') &&
-          !cEl.classList.contains('vc-flow-div') &&
-          isVisuallyTransparentDiv(cEl) &&
-          cEl.children.length >= 1;
-        if (isTransparentWrapper) {
+        if (isPureTransparentLayoutWrapper(cEl)) {
           if (!act.additive) {
             selectedIds = [];
             activeGroupSelectionId = null;
@@ -6555,8 +6850,17 @@
       ev.preventDefault();
       if (copySelectionToClipboard()) deleteSelection('Cut Selection');
     } else if (ctrl && keyLow === 'v') {
-      ev.preventDefault();
-      pasteFromClipboard();
+      // Allow native browser `paste` event to fire so OS clipboard reference images paste into Vectora;
+      // if no native `paste` fires (e.g. synthetic keyboard dispatch), fall back to internal element clipboard!
+      let handledByNativePaste = false;
+      const markPaste = () => { handledByNativePaste = true; };
+      window.addEventListener('paste', markPaste, { once: true, capture: true });
+      setTimeout(() => {
+        window.removeEventListener('paste', markPaste, true);
+        if (!handledByNativePaste && clipboardItems.length > 0) {
+          pasteFromClipboard();
+        }
+      }, 35);
     } else if (ctrl && keyLow === 'd') {
       ev.preventDefault();
       if (copySelectionToClipboard()) pasteFromClipboard();
@@ -6628,6 +6932,37 @@
     }
   }
 
+  window.addEventListener('paste', (ev) => {
+    if (mode !== 'edit' || activeInlineEdit) return;
+    if (['INPUT', 'TEXTAREA'].includes(ev.target?.tagName)) return;
+    const items = Array.from(ev.clipboardData?.items || []);
+    const imgItems = items.filter((it) => it.type && it.type.startsWith('image/'));
+    if (imgItems.length > 0) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      imgItems.forEach((it) => {
+        const file = it.getAsFile();
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+          if (typeof reader.result === 'string') {
+            sendToStudio({
+              type: 'vc_iframe_paste_image',
+              dataUrl: reader.result,
+              name: file.name || 'Pasted Reference Image'
+            });
+          }
+        };
+        reader.readAsDataURL(file);
+      });
+      return;
+    }
+    if (clipboardItems.length > 0) {
+      ev.preventDefault();
+      pasteFromClipboard();
+    }
+  }, true);
+
   // =========================================================================
   // 17. STUDIO <-> BRIDGE MESSAGE BUS
   // =========================================================================
@@ -6648,6 +6983,85 @@
         }
         break;
       }
+      case 'set_user_guides': {
+        userGuides = Array.isArray(msg.guides) ? msg.guides : [];
+        renderOverlays();
+        break;
+      }
+      case 'inspect_note_point': {
+        const br = document.body
+          ? document.body.getBoundingClientRect()
+          : { left: 0, top: 0, width: artboardWidth, height: artboardHeight };
+        const clientX = br.left + (Number(msg.artX) || 0);
+        const clientY = br.top + (Number(msg.artY) || 0);
+        const insideArtboard =
+          clientX >= br.left &&
+          clientX <= br.left + (br.width || artboardWidth) &&
+          clientY >= br.top &&
+          clientY <= br.top + (br.height || artboardHeight);
+        let markRect = {
+          x: Math.round(Number(msg.artX) || 0) - 22,
+          y: Math.round(Number(msg.artY) || 0) - 22,
+          w: 44,
+          h: 44,
+          artboardW: Math.round(br.width || artboardWidth),
+          artboardH: Math.round(br.height || artboardHeight)
+        };
+        let ctx = {
+          selector: 'body',
+          elementTag: 'region',
+          sectionLabel: '',
+          enclosedElements: [],
+          htmlSnippet: ''
+        };
+        if (insideArtboard) {
+          const rawStack = document.elementsFromPoint ? document.elementsFromPoint(clientX, clientY) : [];
+          const rawEl = rawStack.find((el) => el && !isBridgeNode(el) && el !== document.documentElement) || document.body;
+          const hit = resolveSelectableTarget(rawEl, 'direct', { clientX, clientY });
+          let left = clientX - 22;
+          let top = clientY - 22;
+          let w = 44;
+          let h = 44;
+          if (hit && hit !== document.body && hit !== document.documentElement) {
+            const hr = hit.getBoundingClientRect();
+            if (hr.width >= 10 && hr.height >= 10 && hr.width <= artboardWidth * 0.92) {
+              left = hr.left;
+              top = hr.top;
+              w = Math.max(24, hr.width);
+              h = Math.max(24, hr.height);
+            }
+          }
+          ctx = collectNoteRegionContext({ left, top, width: w, height: h }, rawEl);
+          markRect = {
+            x: Math.round(left - br.left),
+            y: Math.round(top - br.top),
+            w: Math.round(w),
+            h: Math.round(h),
+            artboardW: Math.round(br.width || artboardWidth),
+            artboardH: Math.round(br.height || artboardHeight)
+          };
+          pendingNoteMark = {
+            markRect,
+            selector: ctx.selector,
+            elementTag: ctx.elementTag,
+            sectionLabel: ctx.sectionLabel
+          };
+          activeNoteHighlightId = null;
+          renderOverlays();
+        }
+        sendToStudio({
+          type: 'vc_note_point_inspected',
+          requestId: msg.requestId || '',
+          insideArtboard,
+          selector: ctx.selector,
+          elementTag: ctx.elementTag,
+          sectionLabel: ctx.sectionLabel,
+          markRect,
+          enclosedElements: ctx.enclosedElements,
+          htmlSnippet: ctx.htmlSnippet
+        });
+        break;
+      }
       case 'init_sync': {
         mode = msg.mode || mode;
         activeTool = msg.tool || activeTool;
@@ -6657,6 +7071,7 @@
         if (msg.zoom !== undefined) syncHostZoom(msg.zoom, true);
         if (msg.accelMode) accelMode = msg.accelMode === 'cpu' ? 'cpu' : 'gpu';
         if (msg.prefs) prefs = { ...prefs, ...msg.prefs };
+        if (Array.isArray(msg.userGuides)) userGuides = msg.userGuides;
         if (Array.isArray(msg.notes)) currentNotes = msg.notes;
         applyArtboardMode();
         if (!savedBaseline) captureSavedBaseline();
