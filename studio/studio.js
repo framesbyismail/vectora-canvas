@@ -122,6 +122,7 @@
     mode: 'edit', // 'edit' | 'live'
     tool: 'select',
     shapeKind: 'rect',
+    shapeRadius: 16,
     bypassGates: true,
     artboardWidth: 1920,
     artboardHeight: 1080,
@@ -2063,9 +2064,113 @@
     }
   }
 
+  function updateCornerArcPreview(roundPct) {
+    const pct = Math.min(100, Math.max(0, Math.round(Number(roundPct) || 0)));
+    const arcEl = $('cornerArcPath');
+    const dotEl = $('cornerArcDot');
+    if (arcEl) {
+      if (pct <= 0) {
+        arcEl.setAttribute('d', 'M3 13L3 3L13 3');
+      } else {
+        const r = (0.6 + (pct / 100) * 8.4).toFixed(1);
+        const startEnd = (3 + parseFloat(r)).toFixed(1);
+        arcEl.setAttribute('d', `M3 13L3 ${startEnd}A${r} ${r} 0 0 1 ${startEnd} 3L13 3`);
+      }
+    }
+    if (dotEl) {
+      const d = (6.8 + (pct / 100) * 3.0).toFixed(1);
+      dotEl.setAttribute('cx', d);
+      dotEl.setAttribute('cy', d);
+    }
+  }
+
+  function syncTopCornerControlBar(liveOverride = null) {
+    const bar = $('cornerControlBar');
+    if (!bar) return;
+    const sel = state.selection || { count: 0, props: null };
+    const p = sel.props;
+    const isShapeTool = state.tool === 'shape';
+    const isLineShape =
+      (isShapeTool && state.shapeKind === 'line' && sel.count === 0) ||
+      (p && p.shapeKind === 'line');
+
+    const showBar = !isLineShape && (isShapeTool || (sel.count > 0 && Boolean(p)));
+    bar.hidden = !showBar;
+    if (!showBar) return;
+
+    let radPx = 0;
+    let maxRad = 120;
+    let roundPct = 0;
+    let displayTxt = '0 px';
+
+    if (liveOverride) {
+      radPx = Math.max(0, Math.round(Number(liveOverride.radius) || 0));
+      maxRad = Math.max(12, Math.round(Number(liveOverride.maxRadius) || 120));
+      roundPct = Math.min(100, Math.max(0, Math.round(Number(liveOverride.roundPct) || 0)));
+      displayTxt = `${radPx} px`;
+      if (liveOverride.shapeKind && isShapeTool) {
+        state.shapeKind = liveOverride.shapeKind;
+        document.querySelectorAll('#shapeSubbar .shape-opt').forEach((x) => {
+          x.classList.toggle('active', x.getAttribute('data-shape') === state.shapeKind);
+        });
+      }
+    } else if (sel.count > 0 && p) {
+      radPx = Math.max(0, Math.round(Number(p.radius) || 0));
+      maxRad = Math.max(12, Math.round(Number(p.maxRadius) || Math.min(p.w || 120, p.h || 120) / 2 || 120));
+      roundPct = p.roundPct !== undefined
+        ? Math.min(100, Math.max(0, Math.round(p.roundPct)))
+        : Math.min(100, Math.round((radPx / Math.max(1, maxRad)) * 100));
+      displayTxt = p.radiusCss === '50%' ? `50% (${radPx}px)` : `${radPx} px`;
+      if (p.shapeKind && isShapeTool) {
+        state.shapeKind = p.shapeKind;
+        document.querySelectorAll('#shapeSubbar .shape-opt').forEach((x) => {
+          x.classList.toggle('active', x.getAttribute('data-shape') === state.shapeKind);
+        });
+      }
+    } else {
+      // No selection, Shape Tool active — show default radius for the chosen shape kind
+      maxRad = 120;
+      if (state.shapeKind === 'rect') {
+        radPx = 0;
+        roundPct = 0;
+        displayTxt = '0 px';
+      } else if (state.shapeKind === 'rounded') {
+        radPx = Math.max(1, state.shapeRadius || 16);
+        roundPct = Math.min(100, Math.round((radPx / 60) * 100));
+        displayTxt = `${radPx} px`;
+      } else if (state.shapeKind === 'ellipse') {
+        radPx = 60;
+        roundPct = 100;
+        displayTxt = '50%';
+      } else if (state.shapeKind === 'pill') {
+        radPx = 120;
+        roundPct = 100;
+        displayTxt = '999 px';
+      }
+    }
+
+    const slider = $('topCornerSlider');
+    if (slider) {
+      slider.max = String(Math.max(24, Math.min(400, maxRad)));
+      if (document.activeElement !== slider) {
+        slider.value = String(Math.min(Number(slider.max), radPx));
+      }
+    }
+    const pxIn = $('topCornerInput');
+    if (pxIn && document.activeElement !== pxIn) {
+      pxIn.value = displayTxt;
+    }
+    const pctBadge = $('topCornerRoundBadge');
+    if (pctBadge) {
+      pctBadge.textContent = `${roundPct}%`;
+    }
+    updateCornerArcPreview(roundPct);
+  }
+
   function populateInspectorFromSelection() {
     const sel = state.selection;
     $('selectionSummary').textContent = sel.summary || `${state.artboardWidth} × ${state.artboardHeight} Artboard`;
+    syncTopCornerControlBar();
 
     const p = sel.props;
     if (!p) {
@@ -2215,6 +2320,61 @@
     return (state.notes || []).filter((n) => !n.entry || n.entry === state.entry);
   }
 
+  function formatSingleNoteForAgent(n, idxFallback = 1) {
+    const mr = n.markRect || {};
+    const num = n.number || idxFallback;
+    const areaLine = typeof mr.x === 'number'
+      ? `x: ${mr.x}px, y: ${mr.y}px, width: ${mr.w}px, height: ${mr.h}px (Artboard ${mr.artboardW || state.artboardWidth}×${mr.artboardH || state.artboardHeight})`
+      : 'Selected Element / Page';
+    const lines = [
+      `### Note #${num} [${String(n.taskType || 'fix').toUpperCase()}] — Page: \`${n.entry || state.entry || 'index.html'}\``,
+      `- **Marked Area**: ${areaLine}`
+    ];
+    if (n.sectionLabel) lines.push(`- **Section**: \`${n.sectionLabel}\``);
+    if (n.selector) lines.push(`- **Primary Target**: \`${n.selector}\` (<${n.elementTag || 'div'}>)`);
+    if (Array.isArray(n.enclosedElements) && n.enclosedElements.length > 0) {
+      const items = n.enclosedElements
+        .map((e) => `\`${e.selector}\`${e.text ? ` ("${e.text.slice(0, 42)}")` : ''}`)
+        .join(', ');
+      lines.push(`- **Elements Inside Marked Area**: ${items}`);
+    }
+    if (n.htmlSnippet) lines.push(`- **HTML Context**: \`${n.htmlSnippet}\``);
+    lines.push(`- **Instruction**: ${n.text || '(pending)'}`);
+    return lines.join('\n');
+  }
+
+  function formatAllNotesForCodingAgent(notesList) {
+    const arr = Array.isArray(notesList) ? notesList : [];
+    if (!arr.length) return 'No open notes.';
+    const header = [
+      `# Vectora Canvas — Marked UI Notes for Coding Agent`,
+      `Project: ${state.projectName || 'Workspace'}${state.targetPath ? ` (${state.targetPath})` : ''}`,
+      ``
+    ];
+    return [...header, ...arr.map((n, idx) => formatSingleNoteForAgent(n, idx + 1))].join('\n\n');
+  }
+
+  async function copyTextToClipboardSafe(text) {
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (_) {}
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none;left:-9999px;';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   function renderNotesUI() {
     const cnt = state.notes.length;
     $('topNoteCount').textContent = String(cnt);
@@ -2226,37 +2386,75 @@
       list.innerHTML = '<div class="empty-note">Select Note tool (N) and drag on any UI area — or click + New — to attach Coding Agent instructions outside HTML.</div>';
     } else {
       for (const n of state.notes) {
+        const mr = n.markRect || {};
+        const coordsLabel = typeof mr.x === 'number'
+          ? `Marked: X:${mr.x}, Y:${mr.y} · ${mr.w}×${mr.h}px${Array.isArray(n.enclosedElements) && n.enclosedElements.length ? ` · ${n.enclosedElements.length} el` : ''}`
+          : '';
         const card = document.createElement('div');
-        card.className = 'nd-card';
+        card.className = 'nd-card' + (state.editingNote && state.editingNote.id === n.id ? ' active' : '');
         card.innerHTML = `
           <div class="nd-card-top">
             <span>#${escapeHtml(n.number)} · ${escapeHtml((n.taskType || 'fix').toUpperCase())}</span>
             <span>${escapeHtml(n.entry || 'index.html')}</span>
           </div>
-          <div class="nd-card-sel">${escapeHtml(n.selector || 'region')}</div>
+          <div class="nd-card-sel">${escapeHtml(n.sectionLabel ? `${n.sectionLabel} · ${n.selector || 'region'}` : (n.selector || 'region'))}</div>
+          ${coordsLabel ? `<div class="nd-card-coords">${escapeHtml(coordsLabel)}</div>` : ''}
           <div>${escapeHtml(n.text)}</div>
         `;
+        card.addEventListener('mouseenter', () => {
+          if (!n.entry || n.entry === state.entry) {
+            postToBridge('focus_note_mark', { id: n.id });
+          }
+        });
         card.addEventListener('click', () => {
           if (n.entry && n.entry !== state.entry && state.htmlFiles.includes(n.entry)) {
             loadEntryIntoIframe(n.entry);
+            setTimeout(() => {
+              postToBridge('focus_note_mark', { id: n.id, markRect: n.markRect });
+              openNotePopup(n);
+            }, 300);
+            return;
           }
+          postToBridge('focus_note_mark', { id: n.id, markRect: n.markRect });
           openNotePopup(n);
         });
         list.appendChild(card);
       }
     }
-    postToBridge('set_notes', { notes: getNotesForCurrentEntry() });
+    postToBridge('set_notes', {
+      notes: getNotesForCurrentEntry(),
+      clearPending: !$('notePopup') || $('notePopup').hidden,
+      activeNoteId: state.editingNote?.id || null
+    });
+  }
+
+  function closeNotePopup() {
+    state.editingNote = null;
+    $('notePopup').hidden = true;
+    postToBridge('clear_pending_note_mark', { clearHighlight: true });
+    renderNotesUI();
   }
 
   function openNotePopup(noteObj) {
     state.editingNote = noteObj;
     state.noteTaskType = noteObj.taskType || 'fix';
-    $('notePopupTarget').textContent = `Target: ${noteObj.selector || noteObj.elementTag || 'Marked Region'}`;
+    const secPrefix = noteObj.sectionLabel ? `${noteObj.sectionLabel} ▸ ` : '';
+    $('notePopupTarget').textContent = `Target: ${secPrefix}${noteObj.selector || noteObj.elementTag || 'Marked Region'}`;
+    const mr = noteObj.markRect;
+    const encCount = Array.isArray(noteObj.enclosedElements) ? noteObj.enclosedElements.length : 0;
+    if ($('notePopupCoords')) {
+      $('notePopupCoords').textContent = mr && typeof mr.x === 'number'
+        ? `Marked Area: X:${mr.x}, Y:${mr.y} · ${mr.w} × ${mr.h} px${encCount ? ` · ${encCount} item${encCount === 1 ? '' : 's'}` : ''}`
+        : 'Marked Area: Selected Element';
+    }
     $('notePopupInput').value = noteObj.text || '';
     $('btnDeleteNote').hidden = !noteObj.id;
     document.querySelectorAll('#noteTypeGroup .np-type').forEach((b) => {
       b.classList.toggle('active', b.getAttribute('data-ntype') === state.noteTaskType);
     });
+    if (noteObj.id) {
+      postToBridge('focus_note_mark', { id: noteObj.id });
+    }
     $('notePopup').hidden = false;
     $('notePopupInput').focus();
   }
@@ -2280,9 +2478,17 @@
   async function saveActiveNote() {
     const txt = $('notePopupInput').value.trim();
     if (!txt || !state.editingNote) {
-      $('notePopup').hidden = true;
+      closeNotePopup();
       return;
     }
+    // Always ensure Note regions & pins are visible on the artboard after saving a note!
+    if (!state.showNotes) {
+      state.showNotes = true;
+      if ($('chkShowNotes')) $('chkShowNotes').checked = true;
+      postToBridge('set_prefs', { showNotes: true });
+    }
+
+    let savedNum = state.editingNote.number || (state.notes.length + 1);
     if (state.hasServerBackend && !state.vfsMode) {
       const resp = await fetch('/__vc_api/notes', {
         method: 'POST',
@@ -2291,7 +2497,7 @@
           action: 'upsert',
           note: {
             ...state.editingNote,
-            entry: state.entry,
+            entry: state.editingNote.entry || state.entry,
             taskType: state.noteTaskType,
             text: txt
           }
@@ -2300,22 +2506,25 @@
       const json = await resp.json();
       if (json && Array.isArray(json.notes)) {
         state.notes = json.notes;
-        renderNotesUI();
+        savedNum = state.notes[state.notes.length - 1]?.number || savedNum;
       }
     } else {
       const existingIdx = state.editingNote.id
         ? state.notes.findIndex((n) => n.id === state.editingNote.id)
         : -1;
       if (existingIdx >= 0) {
+        savedNum = state.notes[existingIdx].number;
         state.notes[existingIdx] = {
           ...state.notes[existingIdx],
-          entry: state.entry,
+          ...state.editingNote,
+          entry: state.editingNote.entry || state.entry,
           taskType: state.noteTaskType,
           text: txt,
           updatedAt: new Date().toISOString()
         };
       } else {
         const nextNum = state.notes.reduce((m, n) => Math.max(m, Number(n.number) || 0), 0) + 1;
+        savedNum = nextNum;
         state.notes.push({
           ...state.editingNote,
           id: `note_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -2327,9 +2536,12 @@
         });
       }
       persistStandaloneNotesToStorage();
-      renderNotesUI();
     }
+    state.editingNote = null;
     $('notePopup').hidden = true;
+    postToBridge('clear_pending_note_mark', { clearHighlight: false });
+    renderNotesUI();
+    showToast(`Saved Note #${savedNum} + Marked Area for Coding Agent`);
   }
 
   async function persistPreferences() {
@@ -2449,8 +2661,9 @@
     });
     $('activeToolBadge').textContent = TOOL_NAMES[toolName] || toolName;
     $('shapeSubbar').hidden = toolName !== 'shape';
+    syncTopCornerControlBar();
     syncHostCanvasCursor();
-    postToBridge('set_tool', { tool: toolName, shapeKind: state.shapeKind });
+    postToBridge('set_tool', { tool: toolName, shapeKind: state.shapeKind, shapeRadius: state.shapeRadius });
   }
 
   function switchInspectorTab(target) {
@@ -2848,8 +3061,22 @@
 
     let blob;
     let downloadName;
-    if ((textKeys.length > 1 || binKeys.length > 0) && codeSync && typeof codeSync.buildZipUint8Array === 'function') {
-      const zipBytes = codeSync.buildZipUint8Array(state.projectFiles, state.binaryAssets);
+    if ((textKeys.length > 1 || binKeys.length > 0 || state.notes.length > 0) && codeSync && typeof codeSync.buildZipUint8Array === 'function') {
+      const filesForExport = { ...state.projectFiles };
+      if (state.notes.length > 0) {
+        filesForExport['.vectora-notes.json'] = JSON.stringify(
+          {
+            skillName: 'vectora-canvas',
+            notPartOfDesign: true,
+            projectName: state.projectName,
+            agentBrief: formatAllNotesForCodingAgent(state.notes),
+            notes: state.notes
+          },
+          null,
+          2
+        );
+      }
+      const zipBytes = codeSync.buildZipUint8Array(filesForExport, state.binaryAssets);
       blob = new Blob([zipBytes], { type: 'application/zip' });
       downloadName = `${slug}.zip`;
     } else {
@@ -3457,9 +3684,97 @@
       btn.addEventListener('click', () => {
         state.shapeKind = btn.getAttribute('data-shape');
         document.querySelectorAll('#shapeSubbar .shape-opt').forEach((x) => x.classList.toggle('active', x === btn));
-        postToBridge('set_shape_kind', { shapeKind: state.shapeKind });
+        postToBridge('set_shape_kind', {
+          shapeKind: state.shapeKind,
+          applyToSelectedShape: Boolean(state.selection?.isShape && state.selection?.count > 0)
+        });
+        syncTopCornerControlBar();
       });
     });
+
+    // Topbar Adobe Illustrator Live Corner Radius Controls (#cornerControlBar)
+    if ($('topCornerSlider')) {
+      const emitCornerRadius = (valPx, previewOnly, commitScrub) => {
+        const clamped = Math.max(0, Math.round(Number(valPx) || 0));
+        if (clamped > 0) state.shapeRadius = clamped;
+        if (state.tool === 'shape' && state.selection.count === 0) {
+          state.shapeKind = clamped === 0 ? 'rect' : 'rounded';
+          document.querySelectorAll('#shapeSubbar .shape-opt').forEach((x) => {
+            x.classList.toggle('active', x.getAttribute('data-shape') === state.shapeKind);
+          });
+        }
+        const maxR = Number($('topCornerSlider').max) || 120;
+        const pct = Math.min(100, Math.round((Math.min(maxR, clamped) / Math.max(1, maxR)) * 100));
+        if ($('topCornerInput') && document.activeElement !== $('topCornerInput')) {
+          $('topCornerInput').value = `${clamped} px`;
+        }
+        if ($('topCornerRoundBadge')) $('topCornerRoundBadge').textContent = `${pct}%`;
+        if ($('propRadius') && document.activeElement !== $('propRadius')) $('propRadius').value = `${clamped}px`;
+        updateCornerArcPreview(pct);
+        postToBridge('set_corner_radius', { radius: clamped, previewOnly, commitScrub });
+      };
+
+      $('topCornerSlider').addEventListener('input', (ev) => {
+        emitCornerRadius(ev.target.value, true, false);
+      });
+      $('topCornerSlider').addEventListener('change', (ev) => {
+        emitCornerRadius(ev.target.value, false, true);
+      });
+
+      if ($('topCornerInput')) {
+        const commitCornerInput = () => {
+          const raw = ($('topCornerInput').value || '').trim();
+          if (raw === '50%') {
+            postToBridge('set_corner_radius', { radius: 60, radiusCss: '50%', previewOnly: false, commitScrub: true });
+            return;
+          }
+          const parsed = Math.max(0, Math.round(parseFloat(raw) || 0));
+          if ($('topCornerSlider')) $('topCornerSlider').value = String(Math.min(Number($('topCornerSlider').max) || 120, parsed));
+          emitCornerRadius(parsed, false, true);
+          $('topCornerInput').value = `${parsed} px`;
+        };
+        $('topCornerInput').addEventListener('keydown', (ev) => {
+          if (ev.key === 'Enter') {
+            ev.preventDefault();
+            commitCornerInput();
+            $('topCornerInput').blur();
+          } else if (ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
+            ev.preventDefault();
+            const step = ev.shiftKey ? 10 : 1;
+            const cur = Math.max(0, Math.round(parseFloat($('topCornerInput').value) || 0));
+            const next = Math.max(0, cur + (ev.key === 'ArrowUp' ? step : -step));
+            $('topCornerInput').value = `${next} px`;
+            if ($('topCornerSlider')) $('topCornerSlider').value = String(Math.min(Number($('topCornerSlider').max) || 120, next));
+            emitCornerRadius(next, false, true);
+          }
+        });
+        $('topCornerInput').addEventListener('change', commitCornerInput);
+      }
+
+      if ($('cornerScrubHandle')) {
+        $('cornerScrubHandle').addEventListener('mousedown', (ev) => {
+          if (ev.button !== 0) return;
+          ev.preventDefault();
+          const startX = ev.clientX;
+          const startVal = Math.max(0, Math.round(parseFloat($('topCornerInput')?.value) || Number($('topCornerSlider')?.value) || 0));
+          const onMove = (me) => {
+            const dx = Math.round((me.clientX - startX) * (me.shiftKey ? 2 : 0.5));
+            const next = Math.max(0, startVal + dx);
+            if ($('topCornerSlider')) $('topCornerSlider').value = String(Math.min(Number($('topCornerSlider').max) || 120, next));
+            emitCornerRadius(next, true, false);
+          };
+          const onUp = (ue) => {
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup', onUp);
+            const dx = Math.round((ue.clientX - startX) * (ue.shiftKey ? 2 : 0.5));
+            const next = Math.max(0, startVal + dx);
+            emitCornerRadius(next, false, true);
+          };
+          window.addEventListener('mousemove', onMove);
+          window.addEventListener('mouseup', onUp);
+        });
+      }
+    }
 
     $('chkSmartGuides').addEventListener('change', (ev) => {
       state.smartGuides = ev.target.checked;
@@ -3647,8 +3962,33 @@
         document.querySelectorAll('#noteTypeGroup .np-type').forEach((x) => x.classList.toggle('active', x === b));
       });
     });
-    $('btnCancelNote').addEventListener('click', () => { $('notePopup').hidden = true; });
+    $('btnCancelNote').addEventListener('click', closeNotePopup);
     $('btnSaveNote').addEventListener('click', saveActiveNote);
+    if ($('notePopupInput')) {
+      $('notePopupInput').addEventListener('keydown', (ev) => {
+        if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') {
+          ev.preventDefault();
+          saveActiveNote();
+        } else if (ev.key === 'Escape') {
+          ev.preventDefault();
+          closeNotePopup();
+        }
+      });
+    }
+    if ($('btnCopySingleNote')) {
+      $('btnCopySingleNote').addEventListener('click', async () => {
+        if (!state.editingNote) return;
+        const draft = {
+          ...state.editingNote,
+          entry: state.editingNote.entry || state.entry,
+          taskType: state.noteTaskType,
+          text: ($('notePopupInput')?.value || '').trim() || state.editingNote.text || ''
+        };
+        const formatted = formatSingleNoteForAgent(draft, draft.number || (state.notes.length + 1));
+        await copyTextToClipboardSafe(formatted);
+        showToast('Copied Marked Area + Note for Coding Agent');
+      });
+    }
     $('btnDeleteNote').addEventListener('click', async () => {
       if (!state.editingNote?.id) return;
       if (state.hasServerBackend && !state.vfsMode) {
@@ -3660,14 +4000,12 @@
         const json = await resp.json();
         if (json && Array.isArray(json.notes)) {
           state.notes = json.notes;
-          renderNotesUI();
         }
       } else {
         state.notes = state.notes.filter((n) => n.id !== state.editingNote.id);
         persistStandaloneNotesToStorage();
-        renderNotesUI();
       }
-      $('notePopup').hidden = true;
+      closeNotePopup();
     });
     $('btnClearAllNotes').addEventListener('click', async () => {
       if (state.hasServerBackend && !state.vfsMode) {
@@ -3688,26 +4026,9 @@
       }
     });
     $('btnCopyAgentNotes').addEventListener('click', async () => {
-      const lines = state.notes.map((n) => `#${n.number} [${(n.taskType || 'fix').toUpperCase()}] (${n.entry} -> ${n.selector}): ${n.text}`);
-      const payload = lines.join('\n') || 'No open notes.';
-      try {
-        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-          await navigator.clipboard.writeText(payload);
-        } else {
-          throw new Error('clipboard_unavailable');
-        }
-      } catch (_) {
-        try {
-          const ta = document.createElement('textarea');
-          ta.value = payload;
-          ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none;left:-9999px;';
-          document.body.appendChild(ta);
-          ta.select();
-          document.execCommand('copy');
-          ta.remove();
-        } catch (_e) {}
-      }
-      showToast(lines.length ? `Copied ${lines.length} Agent Note${lines.length === 1 ? '' : 's'}` : 'No open notes to copy');
+      const payload = formatAllNotesForCodingAgent(state.notes);
+      await copyTextToClipboardSafe(payload);
+      showToast(state.notes.length ? `Copied ${state.notes.length} Marked Agent Note${state.notes.length === 1 ? '' : 's'}` : 'No open notes to copy');
     });
 
     // Studio-level Keyboard Shortcuts
@@ -4053,11 +4374,24 @@
         }
         break;
       }
+      case 'vc_corner_live': {
+        if (typeof msg.radius === 'number' && msg.radius > 0) {
+          state.shapeRadius = msg.radius;
+        }
+        if ($('propRadius') && document.activeElement !== $('propRadius')) {
+          $('propRadius').value = `${msg.radius || 0}px`;
+        }
+        syncTopCornerControlBar(msg);
+        break;
+      }
       case 'vc_note_marked': {
         openNotePopup({
           selector: msg.selector,
           elementTag: msg.elementTag,
+          sectionLabel: msg.sectionLabel || '',
           markRect: msg.markRect,
+          enclosedElements: Array.isArray(msg.enclosedElements) ? msg.enclosedElements : [],
+          htmlSnippet: msg.htmlSnippet || '',
           taskType: 'fix',
           text: ''
         });

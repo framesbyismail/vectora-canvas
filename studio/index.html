@@ -353,14 +353,30 @@
 
           <!-- Contextual Shape Kind Sub-Bar (shown when Shape tool R is active) -->
           <div class="shape-subbar" id="shapeSubbar" hidden>
-            <button type="button" class="shape-opt active" data-shape="rect" title="Rectangle">Rect</button>
+            <button type="button" class="shape-opt active" data-shape="rect" title="Rectangle (0px)">Rect</button>
             <button type="button" class="shape-opt" data-shape="rounded" title="Rounded Rectangle">Rounded</button>
-            <button type="button" class="shape-opt" data-shape="ellipse" title="Ellipse / Circle">Ellipse</button>
+            <button type="button" class="shape-opt" data-shape="ellipse" title="Ellipse / Circle (50%)">Ellipse</button>
             <button type="button" class="shape-opt" data-shape="pill" title="Capsule / Pill">Pill</button>
             <button type="button" class="shape-opt" data-shape="line" title="Vector Line">Line</button>
           </div>
 
           <span class="sel-pill" id="selectionSummary">1920 × 1080 Artboard</span>
+
+          <!-- Adobe Illustrator-Style Live Corner Radius Control & Pixel Readout -->
+          <div class="corner-ctrl-bar" id="cornerControlBar" hidden title="Adobe Illustrator Live Corner Radius Control (Drag handle, slider, or on-canvas corner widgets)">
+            <span class="cc-lbl" id="cornerScrubHandle" title="Drag left/right to scrub Corner Radius">
+              <svg class="cc-arc-svg" id="cornerArcSvg" viewBox="0 0 16 16" width="14" height="14">
+                <path id="cornerArcPath" d="M3 13L3 3L13 3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                <circle id="cornerArcDot" cx="7.4" cy="7.4" r="1.7" fill="#f97316"/>
+              </svg>
+              <span>Corners:</span>
+            </span>
+            <input type="range" class="cc-slider" id="topCornerSlider" min="0" max="120" step="1" value="0" aria-label="Corner Radius Slider">
+            <div class="cc-px-box">
+              <input type="text" class="cc-px-in" id="topCornerInput" value="0 px" aria-label="Corner Radius Pixels">
+            </div>
+            <span class="cc-pct-pill" id="topCornerRoundBadge" title="Corner roundness percentage (0% sharp → 100% full round)">0%</span>
+          </div>
         </div>
 
         <div class="ct-right">
@@ -435,15 +451,19 @@
           <span class="np-badge">Outside HTML</span>
         </div>
         <div class="np-target" id="notePopupTarget">Target: Marked Region</div>
+        <div class="np-coords" id="notePopupCoords">Marked Area: —</div>
         <div class="np-types" id="noteTypeGroup">
           <button type="button" class="np-type active" data-ntype="fix">Fix</button>
           <button type="button" class="np-type" data-ntype="change">Change</button>
           <button type="button" class="np-type" data-ntype="add">Add</button>
           <button type="button" class="np-type" data-ntype="remove">Remove</button>
         </div>
-        <textarea id="notePopupInput" class="prop-textarea np-textarea" rows="3" placeholder="Describe what the coding agent should fix, change, or add here…"></textarea>
+        <textarea id="notePopupInput" class="prop-textarea np-textarea" rows="3" placeholder="Describe what the coding agent should fix, change, or add inside this marked area…"></textarea>
         <div class="np-foot">
-          <button type="button" class="mini-btn danger" id="btnDeleteNote" hidden>Delete</button>
+          <div class="inline-actions">
+            <button type="button" class="mini-btn danger" id="btnDeleteNote" hidden>Delete</button>
+            <button type="button" class="mini-btn" id="btnCopySingleNote" title="Copy this marked area + note instruction for your Coding Agent">Copy for Agent</button>
+          </div>
           <div class="np-foot-right">
             <button type="button" class="mini-btn" id="btnCancelNote">Cancel</button>
             <button type="button" class="tb-btn primary" id="btnSaveNote">Save Note</button>
@@ -460,14 +480,14 @@
           </span>
           <div class="inline-actions">
             <button type="button" class="mini-btn" id="btnAddNoteFromDrawer" title="Add a note for the selected element or page">+ New</button>
-            <button type="button" class="mini-btn accent" id="btnCopyAgentNotes">Copy Prompt</button>
+            <button type="button" class="mini-btn accent" id="btnCopyAgentNotes" title="Copy all marked regions + instructions as a Coding Agent brief">Copy Prompt</button>
             <button type="button" class="mini-btn" id="btnClearAllNotes">Clear</button>
             <button type="button" class="mini-icon-btn" id="btnCloseNotesDrawer" aria-label="Close">
               <svg viewBox="0 0 12 12" width="11" height="11"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
             </button>
           </div>
         </div>
-        <div class="nd-sub">Stored outside design · Never written into published HTML</div>
+        <div class="nd-sub" id="notesAgentSyncStatus">Marked area + note auto-synced to Coding Agent · Outside HTML</div>
         <div class="nd-list" id="notesDrawerList"></div>
       </aside>
     </section>

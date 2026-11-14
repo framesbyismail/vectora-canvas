@@ -142,11 +142,41 @@ function getWorkspaceNotes(wsId) {
   return Array.isArray(store.workspaces?.[wsId]) ? store.workspaces[wsId] : [];
 }
 
+function buildAgentNotesBrief(wsId, targetDir, notes) {
+  if (!Array.isArray(notes) || !notes.length) return '';
+  const lines = [
+    `# Vectora Canvas — Marked UI Notes for Coding Agent`,
+    `Target Project: ${targetDir || wsId}`,
+    ``
+  ];
+  for (const n of notes) {
+    const mr = n.markRect || {};
+    const areaTxt = typeof mr.x === 'number'
+      ? `x: ${mr.x}px, y: ${mr.y}px, width: ${mr.w}px, height: ${mr.h}px (Artboard ${mr.artboardW || 1920}x${mr.artboardH || 1080})`
+      : 'Full element / page';
+    lines.push(`## Note #${n.number} [${String(n.taskType || 'fix').toUpperCase()}] — Page: ${n.entry || 'index.html'}`);
+    lines.push(`- Marked Area: ${areaTxt}`);
+    if (n.sectionLabel) lines.push(`- Section: ${n.sectionLabel}`);
+    if (n.selector) lines.push(`- Primary Selector: \`${n.selector}\` (${n.elementTag || 'element'})`);
+    if (Array.isArray(n.enclosedElements) && n.enclosedElements.length > 0) {
+      const encSummary = n.enclosedElements
+        .map((e) => `\`${e.selector}\`${e.text ? ` ("${e.text.slice(0, 40)}")` : ''}`)
+        .join(', ');
+      lines.push(`- Elements Inside Marked Area: ${encSummary}`);
+    }
+    if (n.htmlSnippet) lines.push(`- HTML Context: \`${n.htmlSnippet}\``);
+    lines.push(`- User Note / Instruction: ${n.text}`);
+    lines.push(``);
+  }
+  return lines.join('\n');
+}
+
 function mutateWorkspaceNotes(wsId, payload) {
   const store = loadAgentNotesStore();
   store.workspaces = store.workspaces || {};
   let list = Array.isArray(store.workspaces[wsId]) ? store.workspaces[wsId] : [];
   const action = payload.action || 'upsert';
+  const curTarget = originalSourceDir || resolvedTargetDir || args.target || '';
 
   if (action === 'clear') {
     list = [];
@@ -157,20 +187,26 @@ function mutateWorkspaceNotes(wsId, payload) {
     const now = new Date().toISOString();
     const id = incoming.id || `note_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const idx = list.findIndex((n) => n.id === id);
-    const nextNumber = idx >= 0 ? list[idx].number : (list.reduce((m, x) => Math.max(m, Number(x.number) || 0), 0) + 1);
+    const prev = idx >= 0 ? list[idx] : {};
+    const nextNumber = idx >= 0 ? prev.number : (list.reduce((m, x) => Math.max(m, Number(x.number) || 0), 0) + 1);
     const record = {
       id,
       number: nextNumber,
-      entry: incoming.entry || args.entry || 'index.html',
-      viewContext: incoming.viewContext || '',
-      status: incoming.status || 'open',
-      taskType: incoming.taskType || 'fix',
-      selector: incoming.selector || '',
-      elementTag: incoming.elementTag || '',
-      sectionLabel: incoming.sectionLabel || '',
-      markRect: incoming.markRect || null,
+      targetProject: curTarget,
+      entry: incoming.entry || prev.entry || args.entry || 'index.html',
+      viewContext: incoming.viewContext ?? prev.viewContext ?? '',
+      status: incoming.status || prev.status || 'open',
+      taskType: incoming.taskType || prev.taskType || 'fix',
+      selector: incoming.selector ?? prev.selector ?? '',
+      elementTag: incoming.elementTag ?? prev.elementTag ?? '',
+      sectionLabel: incoming.sectionLabel ?? prev.sectionLabel ?? '',
+      markRect: incoming.markRect !== undefined ? incoming.markRect : (prev.markRect || null),
+      enclosedElements: Array.isArray(incoming.enclosedElements)
+        ? incoming.enclosedElements
+        : (Array.isArray(prev.enclosedElements) ? prev.enclosedElements : []),
+      htmlSnippet: incoming.htmlSnippet !== undefined ? String(incoming.htmlSnippet || '') : (prev.htmlSnippet || ''),
       text: String(incoming.text || '').trim(),
-      createdAt: idx >= 0 ? list[idx].createdAt : now,
+      createdAt: idx >= 0 ? prev.createdAt : now,
       updatedAt: now
     };
     if (idx >= 0) list[idx] = record;
@@ -178,6 +214,9 @@ function mutateWorkspaceNotes(wsId, payload) {
   }
 
   store.workspaces[wsId] = list;
+  store.latestWorkspaceId = wsId;
+  store.latestTargetProject = curTarget;
+  store.latestAgentBrief = buildAgentNotesBrief(wsId, curTarget, list);
   saveAgentNotesStore(store);
   return list;
 }
@@ -963,6 +1002,18 @@ function serveStaticFile(req, res, filePath, injectBridge = false) {
     ensureWorkspacesSnapshots(rel, true);
 
     let html = fs.readFileSync(filePath, 'utf8');
+    // Bust in-memory subresource cache for relative <script src> and <link href> when previewFrame reloads with ?vc_ts=...
+    const tsMatch = /[?&]vc_ts=([a-zA-Z0-9_-]+)/.exec(req.url || '');
+    if (tsMatch) {
+      const tsParam = `vc_ts=${tsMatch[1]}`;
+      html = html.replace(
+        /(<(?:script|link)\b[^>]*?\b(?:src|href)\s*=\s*)(["'])((?!https?:|data:|blob:|mailto:|javascript:|#|\/__vc_)[^"']+)\2/gi,
+        (full, pre, q, urlVal) => {
+          const sep = urlVal.includes('?') ? '&' : '?';
+          return `${pre}${q}${urlVal}${sep}${tsParam}${q}`;
+        }
+      );
+    }
     const preBypassTag = `\n<script src="/__vc_studio/prebypass.js" data-vc-bridge="true"></script>\n`;
     if (/<head[^>]*>/i.test(html)) {
       html = html.replace(/<head[^>]*>/i, (m) => `${m}${preBypassTag}`);
@@ -1119,20 +1170,26 @@ const server = http.createServer(async (req, res) => {
 
     if (pathname === '/__vc_api/notes') {
       if (req.method === 'GET') {
+        const notes = getWorkspaceNotes(workspaceId);
+        const curTarget = originalSourceDir || resolvedTargetDir || args.target || '';
         sendJson(res, 200, {
           ok: true,
           notesPath: NOTES_FILE,
           notPartOfDesign: true,
           workspaceId,
-          notes: getWorkspaceNotes(workspaceId)
+          targetProject: curTarget,
+          agentBrief: buildAgentNotesBrief(workspaceId, curTarget, notes),
+          notes
         });
         return;
       }
       if (req.method === 'POST') {
         const body = await readJsonBody(req);
         const notes = mutateWorkspaceNotes(workspaceId, body);
-        broadcastSse('notes_updated', { workspaceId, notes });
-        sendJson(res, 200, { ok: true, notesPath: NOTES_FILE, notes });
+        const curTarget = originalSourceDir || resolvedTargetDir || args.target || '';
+        const agentBrief = buildAgentNotesBrief(workspaceId, curTarget, notes);
+        broadcastSse('notes_updated', { workspaceId, targetProject: curTarget, agentBrief, notes });
+        sendJson(res, 200, { ok: true, notesPath: NOTES_FILE, targetProject: curTarget, agentBrief, notes });
         return;
       }
     }

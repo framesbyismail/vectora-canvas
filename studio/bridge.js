@@ -23,6 +23,7 @@
   let lastSelectionTool = 'select'; // 'select' | 'direct' — used for Illustrator Ctrl/Cmd temporary selection override
   let ctrlHeld = false;
   let activeShapeKind = 'rect'; // rect | rounded | ellipse | pill | line
+  let activeShapeRadius = 16; // default corner radius (px) for rounded shapes
   let artboardWidth = ARTBOARD_DEFAULT_W;
   let artboardHeight = ARTBOARD_DEFAULT_H;
   let showSmartGuides = true;
@@ -108,8 +109,13 @@
   let altHeld = false;
   let hoverId = null;
   let activeInlineEdit = null; // { el, vcId, beforeText, beforeHtml }
-  let pointerAction = null; // Active drag/resize/marquee/shape/div/note/pan session
+  let pointerAction = null; // Active drag/resize/marquee/shape/div/note/pan/corner_radius session
   let currentNotes = [];
+  let pendingNoteMark = null; // { markRect: { x, y, w, h, artboardW, artboardH }, selector, elementTag, sectionLabel }
+  let activeNoteHighlightId = null;
+  let hoverCornerKey = null;
+  let transientCornerHud = null;
+  let transientCornerHudTimer = null;
 
   // =========================================================================
   // 1. INJECT BRIDGE OVERLAY & DARK PASTEBOARD CSS (ZERO BLUE, ZERO WHITE UI)
@@ -369,6 +375,40 @@
         pointer-events: none;
         border-radius: 2px;
       }
+      .__vc_note_box__ {
+        position: fixed;
+        border: 1.5px dashed rgba(249, 115, 22, 0.85);
+        background: rgba(249, 115, 22, 0.08);
+        border-radius: 4px;
+        pointer-events: none;
+        box-sizing: border-box;
+      }
+      .__vc_note_box__.is-draft,
+      .__vc_note_box__.is-pending {
+        border: 2px dashed #fb923c;
+        background: rgba(249, 115, 22, 0.16);
+        box-shadow: 0 0 0 1px rgba(20, 19, 18, 0.72), 0 0 14px rgba(249, 115, 22, 0.25);
+      }
+      .__vc_note_box__.is-active {
+        border: 2px solid #f97316;
+        background: rgba(249, 115, 22, 0.16);
+        box-shadow: 0 0 0 1px rgba(20, 19, 18, 0.78), 0 0 16px rgba(249, 115, 22, 0.35);
+      }
+      .__vc_note_tag__ {
+        position: absolute;
+        left: -1px;
+        bottom: calc(100% + 4px);
+        background: #1c1a18;
+        color: #fb923c;
+        border: 1px solid #f97316;
+        border-radius: 3px;
+        font-size: 10px;
+        font-weight: 700;
+        padding: 1px 6px;
+        white-space: nowrap;
+        pointer-events: none;
+        box-shadow: 0 3px 8px rgba(0, 0, 0, 0.55);
+      }
       .__vc_note_pin__ {
         position: fixed;
         min-width: 20px;
@@ -387,6 +427,50 @@
         pointer-events: auto;
         cursor: pointer;
         box-shadow: 0 3px 10px rgba(0, 0, 0, 0.55);
+        z-index: 2147483646;
+      }
+      .__vc_note_pin__:hover,
+      .__vc_note_pin__.is-active {
+        background: #fb923c;
+        transform: translate(-50%, -50%) scale(1.1);
+      }
+      .__vc_corner_widget__ {
+        position: fixed;
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: #1c1a18;
+        border: 1.8px solid #f97316;
+        box-shadow: 0 0 0 1.3px #ece9e5, 0 2px 5px rgba(0, 0, 0, 0.55);
+        transform: translate(-50%, -50%);
+        pointer-events: auto;
+        cursor: pointer;
+        z-index: 2147483646;
+      }
+      .__vc_corner_widget__:hover,
+      .__vc_corner_widget__.is-dragging {
+        background: #f97316;
+        border-color: #141312;
+        box-shadow: 0 0 0 1.6px #fb923c, 0 0 10px rgba(249, 115, 22, 0.65);
+        transform: translate(-50%, -50%) scale(1.18);
+      }
+      .__vc_corner_hud__ {
+        position: fixed;
+        background: #1c1a18;
+        color: #ece9e5;
+        border: 1px solid #f97316;
+        border-radius: 4px;
+        padding: 2px 7px;
+        font-size: 10.5px;
+        font-weight: 700;
+        white-space: nowrap;
+        transform: translate(-50%, -100%);
+        pointer-events: none;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.65);
+        z-index: 2147483647;
+      }
+      .__vc_corner_hud__ b {
+        color: #fb923c;
       }
       .__vc_artboard_badge__ {
         position: fixed;
@@ -2357,6 +2441,61 @@
     return slot.targetEl.textContent || '';
   }
 
+  function parseCssRadiusToPx(valStr, refSpan) {
+    const raw = String(valStr || '').trim();
+    if (!raw) return 0;
+    const firstPart = raw.split(/\s+/)[0];
+    if (firstPart.endsWith('%')) {
+      return ((parseFloat(firstPart) || 0) / 100) * refSpan;
+    }
+    return parseFloat(firstPart) || 0;
+  }
+
+  function readElementCornerMetrics(el, cs, w, h) {
+    const maxRadius = Math.max(1, Math.round(Math.min(Math.max(2, w), Math.max(2, h)) / 2));
+    const refSpan = Math.min(Math.max(2, w), Math.max(2, h));
+    const inlineBr = (el.style?.borderRadius || '').trim();
+    const isEllipse = /^50%(\s+50%)*$/.test(inlineBr) || el.getAttribute('data-vc-shape') === 'ellipse';
+    const tlRaw = parseCssRadiusToPx(cs.borderTopLeftRadius, refSpan);
+    const trRaw = parseCssRadiusToPx(cs.borderTopRightRadius, refSpan);
+    const brRaw = parseCssRadiusToPx(cs.borderBottomRightRadius, refSpan);
+    const blRaw = parseCssRadiusToPx(cs.borderBottomLeftRadius, refSpan);
+    const tl = Math.max(0, Math.min(maxRadius, Math.round(tlRaw)));
+    const tr = Math.max(0, Math.min(maxRadius, Math.round(trRaw)));
+    const br = Math.max(0, Math.min(maxRadius, Math.round(brRaw)));
+    const bl = Math.max(0, Math.min(maxRadius, Math.round(blRaw)));
+    const uniform = Math.abs(tl - tr) <= 1 && Math.abs(tl - br) <= 1 && Math.abs(tl - bl) <= 1;
+    const avgPx = uniform ? tl : Math.round((tl + tr + br + bl) / 4);
+    const roundPct = Math.min(100, Math.max(0, Math.round((avgPx / maxRadius) * 100)));
+    return {
+      radius: avgPx,
+      radiusCss: isEllipse ? '50%' : uniform ? `${avgPx}px` : `${tl}px ${tr}px ${br}px ${bl}px`,
+      isEllipse,
+      uniform,
+      maxRadius,
+      roundPct,
+      corners: { tl, tr, br, bl },
+      shapeKind: el.getAttribute('data-vc-shape') || ''
+    };
+  }
+
+  function canShowLiveCornerWidgets(el) {
+    if (!el || el === document.body || el === document.documentElement) return false;
+    if (el.getAttribute('data-vc-shape') === 'line') return false;
+    const tag = el.tagName;
+    if (['SVG', 'PATH', 'LINE', 'CIRCLE', 'G', 'BR', 'HR', 'SCRIPT', 'STYLE'].includes(tag)) return false;
+    const r = el.getBoundingClientRect();
+    if (r.width < 22 || r.height < 22) return false;
+    if (el.getAttribute('data-vc-created') === 'shape' || el.classList.contains('vc-flow-div')) return true;
+    if (['DIV', 'SECTION', 'ARTICLE', 'ASIDE', 'HEADER', 'FOOTER', 'NAV', 'BUTTON', 'INPUT', 'TEXTAREA', 'IMG', 'CANVAS', 'FIGURE'].includes(tag)) {
+      return true;
+    }
+    const cs = getComputedStyle(el);
+    const hasBg = cs.backgroundColor && cs.backgroundColor !== 'rgba(0, 0, 0, 0)' && cs.backgroundColor !== 'transparent';
+    const hasBorder = (parseFloat(cs.borderTopWidth) || 0) > 0 && cs.borderTopStyle !== 'none';
+    return Boolean(hasBg || hasBorder);
+  }
+
   function buildSelectionPayload() {
     pruneDisconnectedSelection();
     const bounds = getSelectionBounds();
@@ -2397,6 +2536,11 @@
         ? `${selectedIds.length} objects selected`
         : `${firstEl.tagName.toLowerCase()}${firstEl.id && !firstEl.id.startsWith('vc_') ? '#' + firstEl.id : ''}`;
 
+    const firstRect = firstEl ? firstEl.getBoundingClientRect() : { width: 0, height: 0 };
+    const elemW = Math.round(bounds ? bounds.width : firstRect.width);
+    const elemH = Math.round(bounds ? bounds.height : firstRect.height);
+    const cornerMetrics = firstEl && cs ? readElementCornerMetrics(firstEl, cs, elemW, elemH) : null;
+
     return {
       count: selectedIds.length,
       selectedIds: [...selectedIds],
@@ -2411,13 +2555,18 @@
         tag: firstEl.tagName.toLowerCase(),
         x: bounds ? bounds.artboardX : 0,
         y: bounds ? bounds.artboardY : 0,
-        w: Math.round(bounds ? bounds.width : firstEl.getBoundingClientRect().width),
-        h: Math.round(bounds ? bounds.height : firstEl.getBoundingClientRect().height),
+        w: elemW,
+        h: elemH,
         rotate: extractRotationDeg(firstEl, cs),
         padding: Math.round(parseFloat(cs.paddingTop) || 0),
         margin: Math.round(parseFloat(cs.marginTop) || 0),
         gap: Math.round(parseFloat(cs.gap || cs.columnGap) || 0),
-        radius: Math.round(parseFloat(cs.borderTopLeftRadius) || 0),
+        radius: cornerMetrics ? cornerMetrics.radius : 0,
+        radiusCss: cornerMetrics ? cornerMetrics.radiusCss : '0px',
+        maxRadius: cornerMetrics ? cornerMetrics.maxRadius : 1,
+        roundPct: cornerMetrics ? cornerMetrics.roundPct : 0,
+        corners: cornerMetrics ? cornerMetrics.corners : { tl: 0, tr: 0, br: 0, bl: 0 },
+        shapeKind: cornerMetrics ? cornerMetrics.shapeKind : '',
         display: cs.display || 'block',
         zIndex: cs.zIndex === 'auto' ? '' : cs.zIndex,
         opacity: Math.round((parseFloat(cs.opacity ?? '1') || 1) * 100),
@@ -2680,6 +2829,65 @@
           root.appendChild(h);
         }
 
+        // 4 Adobe Illustrator Live Corner Widgets inside selected shape/box
+        if (
+          selectedIds.length === 1 &&
+          (activeTool === 'select' || activeTool === 'direct' || activeTool === 'shape')
+        ) {
+          const singleEl = getEl(selectedIds[0]);
+          if (singleEl && canShowLiveCornerWidgets(singleEl)) {
+            const sr = singleEl.getBoundingClientRect();
+            const csSingle = getComputedStyle(singleEl);
+            const cm = readElementCornerMetrics(singleEl, csSingle, sr.width, sr.height);
+            const minHalf = Math.max(8, Math.min(sr.width, sr.height) / 2);
+            const baseInset = sr.width < 44 || sr.height < 44 ? 8 : 11;
+            const calcInset = (rPx) =>
+              Math.min(
+                Math.max(baseInset, minHalf - 2),
+                baseInset + (rPx / Math.max(1, cm.maxRadius)) * Math.max(0, Math.min(26, minHalf - baseInset - 2))
+              );
+
+            const cornerDefs = [
+              ['tl', sr.left + calcInset(cm.corners.tl), sr.top + calcInset(cm.corners.tl), cm.corners.tl],
+              ['tr', sr.right - calcInset(cm.corners.tr), sr.top + calcInset(cm.corners.tr), cm.corners.tr],
+              ['br', sr.right - calcInset(cm.corners.br), sr.bottom - calcInset(cm.corners.br), cm.corners.br],
+              ['bl', sr.left + calcInset(cm.corners.bl), sr.bottom - calcInset(cm.corners.bl), cm.corners.bl]
+            ];
+
+            for (const [cKey, cx, cy, cRad] of cornerDefs) {
+              const cw = document.createElement('div');
+              cw.className =
+                '__vc_corner_widget__' +
+                (pointerAction && pointerAction.type === 'corner_radius' && pointerAction.corner === cKey ? ' is-dragging' : '');
+              cw.setAttribute(BRIDGE_ATTR, '1');
+              cw.dataset.corner = cKey;
+              cw.style.left = `${cx}px`;
+              cw.style.top = `${cy}px`;
+              cw.title = `Corner Radius: ${cRad}px (${cm.roundPct}%) · Drag to round (Alt+Drag = single corner)`;
+              cw.addEventListener('mousedown', (ev) => startCornerRadiusDrag(ev, singleEl, cKey));
+              cw.addEventListener('mouseenter', () => {
+                hoverCornerKey = cKey;
+                if (!pointerAction) {
+                  renderOverlays({
+                    cornerHud: {
+                      x: cx,
+                      y: cy - 10,
+                      label: `Corners: <b>${cm.isEllipse ? '50%' : cRad + ' px'}</b> · ${cm.roundPct}%`
+                    }
+                  });
+                }
+              });
+              cw.addEventListener('mouseleave', () => {
+                if (hoverCornerKey === cKey) {
+                  hoverCornerKey = null;
+                  if (!pointerAction) renderOverlays();
+                }
+              });
+              root.appendChild(cw);
+            }
+          }
+        }
+
         // Transform tool (E): show rotation lollipop handle + 9-point anchor dot
         if (activeTool === 'transform') {
           const rx = (bounds.left + bounds.right) / 2;
@@ -2711,7 +2919,7 @@
       }
     }
 
-    // Marquee / Shape / Div / Note live drag preview box
+    // Marquee / Shape / Div live drag preview box
     if (extra.dragBox) {
       const mb = document.createElement('div');
       mb.className = '__vc_marquee__';
@@ -2720,6 +2928,32 @@
       mb.style.width = `${extra.dragBox.width}px`;
       mb.style.height = `${extra.dragBox.height}px`;
       root.appendChild(mb);
+    }
+
+    // Live Note Tool drag box (while dragging)
+    if (extra.noteDraftBox) {
+      const nb = document.createElement('div');
+      nb.className = '__vc_note_box__ is-draft';
+      nb.style.left = `${extra.noteDraftBox.left}px`;
+      nb.style.top = `${extra.noteDraftBox.top}px`;
+      nb.style.width = `${Math.max(16, extra.noteDraftBox.width)}px`;
+      nb.style.height = `${Math.max(16, extra.noteDraftBox.height)}px`;
+      const ntag = document.createElement('div');
+      ntag.className = '__vc_note_tag__';
+      ntag.textContent = `Mark Area · ${Math.round(extra.noteDraftBox.width)} × ${Math.round(extra.noteDraftBox.height)} px`;
+      nb.appendChild(ntag);
+      root.appendChild(nb);
+    }
+
+    // Illustrator Corner Radius HUD pill (on drag, hover, or topbar slider change)
+    const hudInfo = extra.cornerHud || transientCornerHud;
+    if (hudInfo) {
+      const ch = document.createElement('div');
+      ch.className = '__vc_corner_hud__';
+      ch.style.left = `${hudInfo.x}px`;
+      ch.style.top = `${hudInfo.y}px`;
+      ch.innerHTML = hudInfo.label || '';
+      root.appendChild(ch);
     }
 
     // Flow Div insertion indicator line
@@ -2746,36 +2980,84 @@
       }
     }
 
-    // Coding Agent Note pins
+    // Pending Marked Region Box (stays visible right after dragging while writing Note!)
+    if (pendingNoteMark && pendingNoteMark.markRect && document.body) {
+      const br = document.body.getBoundingClientRect();
+      const mr = pendingNoteMark.markRect;
+      const pb = document.createElement('div');
+      pb.className = '__vc_note_box__ is-pending';
+      pb.setAttribute(BRIDGE_ATTR, '1');
+      pb.style.left = `${br.left + mr.x}px`;
+      pb.style.top = `${br.top + mr.y}px`;
+      pb.style.width = `${Math.max(20, mr.w)}px`;
+      pb.style.height = `${Math.max(20, mr.h)}px`;
+      const ptag = document.createElement('div');
+      ptag.className = '__vc_note_tag__';
+      ptag.textContent = `Marked Area · ${mr.w} × ${mr.h} px (${mr.x}, ${mr.y})`;
+      pb.appendChild(ptag);
+      root.appendChild(pb);
+    }
+
+    // Saved Coding Agent Marked Note Regions + Numbered Pins
     if (showNotePins && Array.isArray(currentNotes) && document.body) {
       const br = document.body.getBoundingClientRect();
       for (const n of currentNotes) {
-        let px = br.left + 40;
-        let py = br.top + 40;
+        let rx = br.left + 40;
+        let ry = br.top + 40;
+        let rw = 0;
+        let rh = 0;
         if (n.markRect && typeof n.markRect.x === 'number') {
-          px = br.left + n.markRect.x + (n.markRect.w || 0);
-          py = br.top + n.markRect.y;
+          rx = br.left + n.markRect.x;
+          ry = br.top + n.markRect.y;
+          rw = Math.max(20, Number(n.markRect.w) || 36);
+          rh = Math.max(20, Number(n.markRect.h) || 28);
         } else if (n.selector) {
           try {
             const tEl = document.querySelector(n.selector);
             if (tEl) {
               const tr = tEl.getBoundingClientRect();
-              px = tr.right;
-              py = tr.top;
+              rx = tr.left;
+              ry = tr.top;
+              rw = Math.max(20, Math.round(tr.width));
+              rh = Math.max(20, Math.round(tr.height));
             }
           } catch (_) {}
         }
+
+        const isActiveNote = Boolean(activeNoteHighlightId && n.id === activeNoteHighlightId);
+        if (rw > 0 && rh > 0) {
+          const regionBox = document.createElement('div');
+          regionBox.className = '__vc_note_box__' + (isActiveNote ? ' is-active' : '');
+          regionBox.setAttribute(BRIDGE_ATTR, '1');
+          regionBox.dataset.noteId = n.id || '';
+          regionBox.style.left = `${rx}px`;
+          regionBox.style.top = `${ry}px`;
+          regionBox.style.width = `${rw}px`;
+          regionBox.style.height = `${rh}px`;
+          if (isActiveNote) {
+            const rtag = document.createElement('div');
+            rtag.className = '__vc_note_tag__';
+            rtag.textContent = `#${n.number || '!'} [${String(n.taskType || 'fix').toUpperCase()}] · ${rw}×${rh}px`;
+            regionBox.appendChild(rtag);
+          }
+          root.appendChild(regionBox);
+        }
+
+        const px = rw > 0 ? rx + rw : rx;
+        const py = ry;
         const pin = document.createElement('button');
         pin.type = 'button';
-        pin.className = '__vc_note_pin__';
+        pin.className = '__vc_note_pin__' + (isActiveNote ? ' is-active' : '');
         pin.setAttribute(BRIDGE_ATTR, '1');
         pin.style.left = `${px}px`;
         pin.style.top = `${py}px`;
         pin.textContent = String(n.number || '!');
-        pin.title = n.text || 'Coding Agent Note';
+        pin.title = `#${n.number || '!'} (${rw}×${rh}px): ${n.text || 'Coding Agent Note'}`;
         pin.addEventListener('mousedown', (ev) => {
           ev.stopPropagation();
           ev.preventDefault();
+          activeNoteHighlightId = n.id || null;
+          renderOverlays();
           sendToStudio({ type: 'vc_open_note', note: n });
         });
         root.appendChild(pin);
@@ -2970,6 +3252,187 @@
     } else if (act && act.collapseOnClick && act.clickedHit && alignKeyMode !== '__key__') {
       selectSingleOrToggle(act.clickedHit, false);
     }
+  }
+
+  function startCornerRadiusDrag(ev, el, cornerKey) {
+    ev.stopPropagation();
+    ev.preventDefault();
+    if (!el || !el.isConnected) return;
+    const rect = el.getBoundingClientRect();
+    const cs = getComputedStyle(el);
+    const cm = readElementCornerMetrics(el, cs, rect.width, rect.height);
+    const dxSign = cornerKey === 'tl' || cornerKey === 'bl' ? 1 : -1;
+    const dySign = cornerKey === 'tl' || cornerKey === 'tr' ? 1 : -1;
+    pointerAction = {
+      type: 'corner_radius',
+      el,
+      corner: cornerKey,
+      startX: ev.clientX,
+      startY: ev.clientY,
+      startRadius: cm.corners[cornerKey] ?? cm.radius,
+      maxRadius: cm.maxRadius,
+      dxSign,
+      dySign,
+      before: snapshotElementState(el),
+      changed: false,
+      lastRadius: cm.corners[cornerKey] ?? cm.radius,
+      singleCorner: Boolean(ev.altKey)
+    };
+  }
+
+  function updateCornerRadiusDrag(ev) {
+    const act = pointerAction;
+    if (!act || !act.el || !act.el.isConnected) return;
+    const diagDelta = ((ev.clientX - act.startX) * act.dxSign + (ev.clientY - act.startY) * act.dySign) / Math.SQRT2;
+    const nextRadius = Math.max(0, Math.min(act.maxRadius, Math.round(act.startRadius + diagDelta)));
+    act.singleCorner = Boolean(ev.altKey);
+    act.lastRadius = nextRadius;
+    act.changed = true;
+
+    const cornerPropMap = {
+      tl: 'border-top-left-radius',
+      tr: 'border-top-right-radius',
+      br: 'border-bottom-right-radius',
+      bl: 'border-bottom-left-radius'
+    };
+
+    if (act.singleCorner) {
+      const cssProp = cornerPropMap[act.corner] || 'border-top-left-radius';
+      act.el.style.setProperty(cssProp, `${nextRadius}px`);
+      recordPatchedProp(act.el, cssProp, `${nextRadius}px`);
+    } else {
+      for (const p of Object.values(cornerPropMap)) {
+        act.el.style.removeProperty(p);
+        recordPatchedProp(act.el, p, null);
+      }
+      act.el.style.setProperty('border-radius', `${nextRadius}px`);
+      recordPatchedProp(act.el, 'border-radius', `${nextRadius}px`);
+      if (act.el.getAttribute('data-vc-created') === 'shape') {
+        const nextKind = nextRadius === 0 ? 'rect' : nextRadius >= act.maxRadius ? 'pill' : 'rounded';
+        act.el.setAttribute('data-vc-shape', nextKind);
+        if (nextRadius > 0 && nextRadius < act.maxRadius) activeShapeRadius = nextRadius;
+      }
+    }
+
+    syncAuthoritativeStyleRules();
+    const roundPct = Math.min(100, Math.max(0, Math.round((nextRadius / Math.max(1, act.maxRadius)) * 100)));
+    const tagPrefix = act.singleCorner ? `${act.corner.toUpperCase()}: ` : 'Corners: ';
+    renderOverlays({
+      cornerHud: {
+        x: ev.clientX,
+        y: ev.clientY - 14,
+        label: `${tagPrefix}<b>${nextRadius} px</b> · ${roundPct}%`
+      }
+    });
+    sendToStudio({
+      type: 'vc_corner_live',
+      radius: nextRadius,
+      maxRadius: act.maxRadius,
+      roundPct,
+      singleCorner: act.singleCorner,
+      corner: act.corner,
+      shapeKind: act.el.getAttribute('data-vc-shape') || ''
+    });
+  }
+
+  function finishCornerRadiusDrag(act) {
+    if (act && act.changed && act.el) {
+      pushHistoryStep({
+        label: 'Round Corners',
+        entries: [{ kind: 'style', before: act.before, after: snapshotElementState(act.el) }]
+      });
+    }
+    renderOverlays();
+    sendTreeAndSelectionUpdate();
+  }
+
+  function collectNoteRegionContext(viewportBox, rawTarget) {
+    const br = document.body ? document.body.getBoundingClientRect() : { left: 0, top: 0, width: artboardWidth, height: artboardHeight };
+    const cx = viewportBox.left + viewportBox.width / 2;
+    const cy = viewportBox.top + viewportBox.height / 2;
+    let primaryHit = resolveSelectableTarget(rawTarget, 'direct', { clientX: cx, clientY: cy });
+    if (!primaryHit || primaryHit === document.body) {
+      const stack = document.elementsFromPoint ? document.elementsFromPoint(cx, cy) : [];
+      primaryHit = stack.find((el) => el && el !== document.body && el !== document.documentElement && !isBridgeNode(el) && isElementVisible(el)) || document.body;
+    }
+
+    // Find enclosing named session / section
+    collectNamedSessions();
+    let sectionLabel = '';
+    for (const s of namedSessions) {
+      const sEl = getEl(s.vcId);
+      if (sEl && (sEl === primaryHit || sEl.contains(primaryHit))) {
+        sectionLabel = s.name;
+      }
+    }
+
+    // Find all relevant visible DOM elements intersecting the marked rectangle
+    const enclosed = [];
+    if (document.body) {
+      const allEls = document.body.querySelectorAll('*');
+      for (const el of allEls) {
+        if (isBridgeNode(el) || !isElementVisible(el)) continue;
+        if (['SCRIPT', 'STYLE', 'SVG', 'PATH', 'G', 'DEFS', 'BR'].includes(el.tagName)) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < 4 || r.height < 4) continue;
+        // Skip giant page-wide wrappers unless it's the only match
+        if (r.width >= artboardWidth * 0.85 && r.height >= artboardHeight * 0.7 && el.children.length > 2) continue;
+        const ix1 = Math.max(viewportBox.left, r.left);
+        const iy1 = Math.max(viewportBox.top, r.top);
+        const ix2 = Math.min(viewportBox.left + viewportBox.width, r.right);
+        const iy2 = Math.min(viewportBox.top + viewportBox.height, r.bottom);
+        if (ix2 <= ix1 || iy2 <= iy1) continue;
+        const interArea = (ix2 - ix1) * (iy2 - iy1);
+        const elArea = Math.max(1, r.width * r.height);
+        const coverage = interArea / elArea;
+        if (coverage < 0.25 && interArea < (viewportBox.width * viewportBox.height) * 0.2) continue;
+        const directTxt = (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 64);
+        enclosed.push({
+          selector: computeCleanSelector(el),
+          tag: el.tagName.toLowerCase(),
+          id: el.id && !el.id.startsWith('vc_') ? el.id : '',
+          dataName: el.getAttribute('data-name') || '',
+          text: directTxt,
+          coverage: Math.round(coverage * 100) / 100,
+          rect: {
+            x: Math.round(r.left - br.left),
+            y: Math.round(r.top - br.top),
+            w: Math.round(r.width),
+            h: Math.round(r.height)
+          }
+        });
+      }
+    }
+    enclosed.sort((a, b) => (b.coverage - a.coverage) || ((a.rect.w * a.rect.h) - (b.rect.w * b.rect.h)));
+    const enclosedElements = enclosed.slice(0, 10).map(({ coverage, ...rest }) => rest);
+
+    // Compact sanitized HTML snippet of primary target
+    let htmlSnippet = '';
+    if (primaryHit && primaryHit !== document.body) {
+      const clone = primaryHit.cloneNode(true);
+      clone.querySelectorAll(`[${BRIDGE_ATTR}]`).forEach((n) => n.remove());
+      [clone, ...clone.querySelectorAll('*')].forEach((n) => {
+        Array.from(n.attributes || []).forEach((attr) => {
+          if (attr.name.startsWith('data-vc-')) n.removeAttribute(attr.name);
+        });
+        if (n.classList) {
+          Array.from(n.classList).forEach((c) => {
+            if (c.startsWith('__vc_') || c === 'vc-selected') n.classList.remove(c);
+          });
+          if (!n.className) n.removeAttribute('class');
+        }
+      });
+      htmlSnippet = clone.outerHTML.replace(/\s+/g, ' ').trim().slice(0, 420);
+    }
+
+    return {
+      primaryEl: primaryHit,
+      selector: primaryHit && primaryHit !== document.body ? computeCleanSelector(primaryHit) : (enclosedElements[0]?.selector || 'body'),
+      elementTag: primaryHit && primaryHit !== document.body ? primaryHit.tagName.toLowerCase() : (enclosedElements[0]?.tag || 'region'),
+      sectionLabel,
+      enclosedElements,
+      htmlSnippet
+    };
   }
 
   // Opposite handle anchor map (Illustrator standard: opposite corner or edge stays fixed!)
@@ -3273,7 +3736,7 @@
     shape.setAttribute('data-vc-shape', activeShapeKind);
 
     let radiusCss = '0px';
-    if (activeShapeKind === 'rounded') radiusCss = '12px';
+    if (activeShapeKind === 'rounded') radiusCss = `${Math.max(1, activeShapeRadius || 16)}px`;
     else if (activeShapeKind === 'ellipse') radiusCss = '50%';
     else if (activeShapeKind === 'pill') radiusCss = '9999px';
 
@@ -5236,6 +5699,10 @@
         updateRotateDrag(ev);
         return;
       }
+      if (pointerAction.type === 'corner_radius') {
+        updateCornerRadiusDrag(ev);
+        return;
+      }
       if (pointerAction.type === 'pending_container_or_marquee') {
         pointerAction.curX = ev.clientX;
         pointerAction.curY = ev.clientY;
@@ -5264,6 +5731,10 @@
           width: Math.abs(ev.clientX - pointerAction.startX),
           height: Math.abs(ev.clientY - pointerAction.startY)
         };
+        if (pointerAction.type === 'draw_note') {
+          renderOverlays({ noteDraftBox: box });
+          return;
+        }
         const extra = { dragBox: box };
         if (pointerAction.type === 'draw_div') {
           extra.dropLine = findFlowContainerInsertion(pointerAction.startX, pointerAction.startY).dropLine;
@@ -5304,6 +5775,8 @@
       finishResizeDrag(act);
     } else if (act.type === 'rotate') {
       finishRotateDrag(act);
+    } else if (act.type === 'corner_radius') {
+      finishCornerRadiusDrag(act);
     } else if (act.type === 'pending_container_or_marquee') {
       if (act.isCtrl) {
         handleIllustratorControlClick(ev, act.effectiveTool || 'select');
@@ -5340,24 +5813,63 @@
       const ins = findFlowContainerInsertion(act.startX, act.startY);
       createFlowDivAt(ins, box);
     } else if (act.type === 'draw_note') {
-      const br = document.body ? document.body.getBoundingClientRect() : { left: 0, top: 0 };
-      const left = Math.min(act.startX, ev.clientX);
-      const top = Math.min(act.startY, ev.clientY);
-      const w = Math.max(24, Math.abs(ev.clientX - act.startX));
-      const h = Math.max(24, Math.abs(ev.clientY - act.startY));
-      const hit = resolveSelectableTarget(act.rawTarget, 'direct');
+      const br = document.body ? document.body.getBoundingClientRect() : { left: 0, top: 0, width: artboardWidth, height: artboardHeight };
+      const rawDx = Math.abs(ev.clientX - act.startX);
+      const rawDy = Math.abs(ev.clientY - act.startY);
+      let left = Math.min(act.startX, ev.clientX);
+      let top = Math.min(act.startY, ev.clientY);
+      let w = Math.max(24, rawDx);
+      let h = Math.max(24, rawDy);
+
+      // If user clicked a spot rather than dragging a box, snap to the clicked element's bounds so the marked region is crystal clear!
+      if (rawDx < 8 && rawDy < 8) {
+        const clickHit = resolveSelectableTarget(act.rawTarget, 'direct', { clientX: ev.clientX, clientY: ev.clientY });
+        if (clickHit && clickHit !== document.body && clickHit !== document.documentElement) {
+          const cr = clickHit.getBoundingClientRect();
+          if (cr.width >= 12 && cr.height >= 12 && cr.width <= artboardWidth * 0.9) {
+            left = cr.left;
+            top = cr.top;
+            w = Math.max(24, cr.width);
+            h = Math.max(24, cr.height);
+          }
+        } else {
+          left = ev.clientX - 22;
+          top = ev.clientY - 22;
+          w = 44;
+          h = 44;
+        }
+      }
+
+      const viewportBox = { left, top, width: w, height: h };
+      const ctx = collectNoteRegionContext(viewportBox, act.rawTarget);
+      const markRect = {
+        x: Math.round(left - br.left),
+        y: Math.round(top - br.top),
+        w: Math.round(w),
+        h: Math.round(h),
+        artboardW: Math.round(br.width || artboardWidth),
+        artboardH: Math.round(br.height || artboardHeight)
+      };
+
+      // Keep the marked region box visible on screen while the Note composer popup is open!
+      pendingNoteMark = {
+        markRect,
+        selector: ctx.selector,
+        elementTag: ctx.elementTag,
+        sectionLabel: ctx.sectionLabel
+      };
+      activeNoteHighlightId = null;
+      renderOverlays();
+
       sendToStudio({
         type: 'vc_note_marked',
-        selector: hit ? computeCleanSelector(hit) : 'body',
-        elementTag: hit ? hit.tagName.toLowerCase() : 'region',
-        markRect: {
-          x: Math.round(left - br.left),
-          y: Math.round(top - br.top),
-          w: Math.round(w),
-          h: Math.round(h)
-        }
+        selector: ctx.selector,
+        elementTag: ctx.elementTag,
+        sectionLabel: ctx.sectionLabel,
+        markRect,
+        enclosedElements: ctx.enclosedElements,
+        htmlSnippet: ctx.htmlSnippet
       });
-      renderOverlays();
     }
   }, true);
 
@@ -5644,11 +6156,88 @@
         activeTool = msg.tool || 'select';
         if (activeTool === 'select' || activeTool === 'direct') lastSelectionTool = activeTool;
         if (msg.shapeKind) activeShapeKind = msg.shapeKind;
+        if (typeof msg.shapeRadius === 'number') activeShapeRadius = Math.max(0, msg.shapeRadius);
         renderOverlays();
         break;
       }
       case 'set_shape_kind': {
         activeShapeKind = msg.shapeKind || 'rect';
+        if (msg.applyToSelectedShape && selectedIds.length > 0) {
+          pruneDisconnectedSelection();
+          const shapeEls = selectedIds
+            .map((id) => getEl(id))
+            .filter((el) => el && el.getAttribute('data-vc-created') === 'shape');
+          if (shapeEls.length > 0 && activeShapeKind !== 'line') {
+            const entries = [];
+            for (const el of shapeEls) {
+              const before = snapshotElementState(el);
+              el.setAttribute('data-vc-shape', activeShapeKind);
+              const nextRad =
+                activeShapeKind === 'rect'
+                  ? '0px'
+                  : activeShapeKind === 'rounded'
+                    ? `${Math.max(1, activeShapeRadius || 16)}px`
+                    : activeShapeKind === 'ellipse'
+                      ? '50%'
+                      : '9999px';
+              ['border-top-left-radius', 'border-top-right-radius', 'border-bottom-right-radius', 'border-bottom-left-radius'].forEach((p) => {
+                el.style.removeProperty(p);
+                recordPatchedProp(el, p, null);
+              });
+              el.style.setProperty('border-radius', nextRad);
+              recordPatchedProp(el, 'border-radius', nextRad);
+              entries.push({ kind: 'style', before, after: snapshotElementState(el) });
+            }
+            syncAuthoritativeStyleRules();
+            pushHistoryStep({ label: `Set Shape Kind (${activeShapeKind})`, entries });
+            renderOverlays();
+            sendTreeAndSelectionUpdate();
+          }
+        }
+        break;
+      }
+      case 'set_corner_radius': {
+        const numR = Math.max(0, Math.round(Number(msg.radius) || 0));
+        if (numR > 0) activeShapeRadius = numR;
+        if (activeShapeKind === 'rect' && numR > 0) activeShapeKind = 'rounded';
+        pruneDisconnectedSelection();
+        if (selectedIds.length > 0) {
+          const cssRad = msg.radiusCss ? String(msg.radiusCss) : `${numR}px`;
+          applyStylePatchFromInspector({
+            props: {
+              borderTopLeftRadius: null,
+              borderTopRightRadius: null,
+              borderBottomRightRadius: null,
+              borderBottomLeftRadius: null,
+              borderRadius: cssRad
+            },
+            previewOnly: Boolean(msg.previewOnly),
+            commitScrub: Boolean(msg.commitScrub)
+          });
+          const firstEl = getEl(selectedIds[0]);
+          if (firstEl) {
+            if (firstEl.getAttribute('data-vc-created') === 'shape' && firstEl.getAttribute('data-vc-shape') !== 'line') {
+              const r = firstEl.getBoundingClientRect();
+              const maxR = Math.max(1, Math.round(Math.min(r.width, r.height) / 2));
+              firstEl.setAttribute('data-vc-shape', numR === 0 ? 'rect' : numR >= maxR ? 'pill' : 'rounded');
+            }
+            const r = firstEl.getBoundingClientRect();
+            const maxR = Math.max(1, Math.round(Math.min(r.width, r.height) / 2));
+            const effPx = Math.min(maxR, numR);
+            const pct = Math.min(100, Math.round((effPx / maxR) * 100));
+            transientCornerHud = {
+              x: r.left + r.width / 2,
+              y: Math.max(24, r.top - 8),
+              label: `Corners: <b>${effPx} px</b> · ${pct}%`
+            };
+            if (transientCornerHudTimer) clearTimeout(transientCornerHudTimer);
+            transientCornerHudTimer = setTimeout(() => {
+              transientCornerHud = null;
+              renderOverlays();
+            }, 900);
+            renderOverlays();
+          }
+        }
         break;
       }
       case 'set_artboard': {
@@ -5998,6 +6587,28 @@
       }
       case 'set_notes': {
         currentNotes = Array.isArray(msg.notes) ? msg.notes : [];
+        if (msg.clearPending !== false) {
+          pendingNoteMark = null;
+        }
+        if (msg.activeNoteId !== undefined) {
+          activeNoteHighlightId = msg.activeNoteId || null;
+        }
+        renderOverlays();
+        break;
+      }
+      case 'clear_pending_note_mark': {
+        pendingNoteMark = null;
+        if (msg.clearHighlight !== false) activeNoteHighlightId = null;
+        renderOverlays();
+        break;
+      }
+      case 'focus_note_mark': {
+        activeNoteHighlightId = msg.id || null;
+        if (msg.markRect && typeof msg.markRect.y === 'number' && document.documentElement) {
+          const viewH = window.innerHeight || 800;
+          const targetScrollTop = Math.max(0, msg.markRect.y - viewH * 0.3);
+          window.scrollTo({ top: targetScrollTop, behavior: 'auto' });
+        }
         renderOverlays();
         break;
       }

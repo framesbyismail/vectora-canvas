@@ -36,8 +36,8 @@ Whenever generating, editing, or preparing HTML/CSS/JS to be used or opened in *
    - Put navigable destinations on `<a href="page.html">`, `<button data-vc-link="page.html">`, or `data-href="#section"` using relative paths so the **`Links` Inspector Tab** lists every button/page link as an editable card and works in both server mode and `blob:` VFS local-folder mode.
 5. **Flex/Grid Flow & Theme Variables**:
    - Prefer `display: flex` / `display: grid` with `gap` so Flow Divs (`D`) automatically claim space and close horizontal/vertical gaps on delete; expose `:root` `--primary` and `--secondary` CSS variables for live palette editing.
-6. **Agent Notes & Sync Blocks**:
-   - Check `H:/AntyGravety/Vectora Canvas/memory/agent-notes.json` (or `.vectora-notes.json`) for pinned user tasks and preserve `/* === VECTORA CANVAS SYNC === */` blocks.
+6. **Marked Region Notes & Sync Blocks (`agent-notes.json`)**:
+   - Check `H:/AntyGravety/Vectora Canvas/memory/agent-notes.json` (or `GET http://127.0.0.1:4680/__vc_api/notes` / `.vectora-notes.json`) for pinned user tasks — each note supplies `latestAgentBrief`, exact `markRect` (`x, y, w, h`), `sectionLabel`, primary `selector`, all `enclosedElements` inside the marked box, `htmlSnippet`, and the user's `text` instruction. Preserve `/* === VECTORA CANVAS SYNC === */` blocks.
 
 ---
 
@@ -77,3 +77,5 @@ curl -X POST http://127.0.0.1:4680/__vc_api/switch-target \
   - Full client-side VFS runtime resolves dynamic `<script src="...">` injection, relative `fetch()`, `#hash` scrolling, and multi-page button/link navigation when opening local folders in the web app.
 - **One-Folder Recent Projects & Fixed-Width Page Selector**: `Open Recent Project` deduplicates strictly to one entry per project folder; topbar page selector (`#ddPage`) keeps a fixed `128px` width; `Layers` highlights and auto-scrolls to any canvas selection.
 - **GPU-First Acceleration with Automatic CPU Fallback**: Automatically probes WebGL2/WebGL1 hardware vs software/unavailable GPU, runs 3D `translate3d` compositor acceleration when GPU is healthy, and falls back seamlessly to lightweight 2D CPU rendering (`#accelModeBadge` + Preferences `Auto / GPU / CPU`).
+- **Persistent Marked-Area Note Tool (`N`) + Full Coding Agent Handoff**: Dragging with the Note tool draws a persistent Warm Orange region rectangle (`__vc_note_box__`) that stays visible both while writing the note (`is-pending`) and after saving alongside its numbered pin (`__vc_note_pin__`), syncing `markRect`, `sectionLabel`, `selector`, `enclosedElements`, `htmlSnippet`, and `text` directly to `memory/agent-notes.json`, `/__vc_api/notes`, 1-click `Copy Prompt`, and `.vectora-notes.json` in `.zip` exports.
+- **Adobe Illustrator Live Corner Widgets & Topbar Pixel/Roundness Control**: Selecting any shape, `<div>`, or card renders 4 circular Live Corner handles (`tl`, `tr`, `br`, `bl` — drag to round all corners, `Alt+Drag` for a single corner) and activates `#cornerControlBar` in the top canvas toolbar with a dynamic bending corner SVG, scrubbable `Corners:` label, slider, exact pixel input (`px`), and live roundness percentage badge (`%`).

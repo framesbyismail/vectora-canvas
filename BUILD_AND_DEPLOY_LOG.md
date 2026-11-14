@@ -138,3 +138,18 @@
 - **Fixes (`studio/studio.js`, `studio/studio.css`, `studio/bridge.js`, `studio/index.html`)**:
   - `detectHardwareAcceleration()` probes WebGL2/WebGL1 + `WEBGL_debug_renderer_info` to distinguish hardware GPUs from software renderers (`SwiftShader`, `llvmpipe`, `Basic Render Driver`) or unavailable WebGL.
   - Applies `html[data-vc-accel="gpu"]` (`translate3d` GPU layer compositing) when hardware GPU is active, and automatically falls back to `html[data-vc-accel="cpu"]` (integer `translate()` 2D transforms, zero `will-change` layer bloat, lightweight borders) when GPU is missing or software-emulated, controllable anytime from `#accelModeBadge` or `Preferences → Compute Acceleration Engine (Auto / GPU / CPU)`.
+
+---
+
+## Phase 3 — Persistent Marked-Region Notes + Coding Agent Handoff & Illustrator Live Corner Controls
+
+### 13. Note Tool (`N`) Marked Area Persistence & Full Coding Agent Handoff
+- **Root Cause**: Previously, releasing the mouse (`mouseup`) after dragging a Note marquee cleared the temporary box before the user finished typing in `#notePopup`, and saved notes only rendered a `20×20` pin without drawing the marked region rectangle (`markRect`).
+- **Fixes (`studio/bridge.js`, `studio/studio.js`, `studio/index.html`, `studio/studio.css`, `scripts/server.mjs`)**:
+  - **Persistent Draft & Saved Region Box**: `mouseup` now stores `pendingNoteMark` (`__vc_note_box__.is-pending`) so the exact marked area box stays clearly visible while `#notePopup` is open (displaying `Marked Area: X, Y · W × H px · K items`), clears cleanly if canceled, and stays permanently visible on the artboard (`__vc_note_box__` + `__vc_note_pin__`) once saved. Clicking a note card in `#notesDrawer` focuses, highlights, and scrolls to that marked region (`focus_note_mark`).
+  - **Full Coding Agent Context (`collectNoteRegionContext` + `buildAgentNotesBrief`)**: Captures `markRect` (`x, y, w, h, artboardW, artboardH`), `sectionLabel`, primary `selector`, **all `enclosedElements`** inside the marked rectangle, sanitized `htmlSnippet`, `taskType`, `entry`, and `text`, writing them + `latestAgentBrief` automatically to `memory/agent-notes.json` (`/__vc_api/notes`), 1-click `Copy Prompt` / `Copy for Agent`, and `.vectora-notes.json` inside `.zip` exports (while keeping published HTML 100% clean).
+
+### 14. Shape Round Corner Control + Adobe Illustrator Topbar Pixel (`px`) & Roundness (`%`) Display
+- **Fixes (`studio/index.html`, `studio/studio.css`, `studio/bridge.js`, `studio/studio.js`)**:
+  - **4 On-Canvas Live Corner Widgets (`__vc_corner_widget__`)**: Renders 4 Illustrator-style circular bulls-eye handles (`tl`, `tr`, `br`, `bl`) inside the corners of any selected shape, `<div>`, or card. Dragging inward/outward rounds all 4 corners smoothly with live floating HUD (`Corners: 28 px · 47%`) and full Undo/Redo; holding **`Alt+Drag`** rounds a single corner independently.
+  - **Topbar Illustrator `Corners:` Control (`#cornerControlBar`)**: Placed directly beside `[Shape Tool (R)] [Rect | Rounded | Ellipse | Pill | Line] div` in `.canvas-toolbar .ct-left`, featuring a dynamic SVG corner arc (`#cornerArcPath` + `#cornerArcDot`) that bends proportionally from 90° (`0%`) to a full curve (`100%`), scrubbable `Corners:` label, live Warm Orange slider (`#topCornerSlider`), exact pixel input (`#topCornerInput`, e.g. `33 px`), and live roundness percentage badge (`#topCornerRoundBadge`, e.g. `55%`) with zero toolbar clipping.

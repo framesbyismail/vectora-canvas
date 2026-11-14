@@ -41,6 +41,7 @@ Follow these rules whenever creating, editing, refactoring, or previewing HTML/C
    - Define `--primary` (or `--accent`) and `--secondary` in `:root` so Vectora Canvas's Primary & Secondary color pickers live-preview and persist theme changes cleanly.
 6. **Composite Button & Group Cleanliness**:
    - Keep button icons (`<svg>`) and labels (`<span>`) inside a single `<button>` or `.btn` container so Vectora treats the button as a cohesive unit by default and allows **Double-Click Isolation Mode** when editing inner icons/text individually.
-7. **Sync Blocks & Coding Agent Notes**:
-   - Check `H:/AntyGravety/Vectora Canvas/memory/agent-notes.json` (or `.vectora-notes.json`) when asked to implement notes pinned in Vectora Canvas.
+7. **Marked Region Notes & Coding Agent Handoff (`agent-notes.json`)**:
+   - Whenever the user marks a region with the **Note Tool (`N`)** in Vectora Canvas, read `H:/AntyGravety/Vectora Canvas/memory/agent-notes.json` (or `GET http://127.0.0.1:4680/__vc_api/notes` / `.vectora-notes.json` in exported `.zip` archives).
+   - Each note record includes **both** the exact **Marked Area** (`markRect: { x, y, w, h, artboardW, artboardH }`, `sectionLabel`, primary `selector` / `elementTag`, `enclosedElements` listing every DOM element inside the marked box, and `htmlSnippet`) **and** the user's **Note Instruction** (`text`, `taskType`, `entry`, plus ready-to-read `latestAgentBrief`). Apply requested edits accurately to those enclosed elements/selectors.
    - Preserve or cleanly merge `/* === VECTORA CANVAS SYNC === */` CSS blocks and `data-vc-*` link attributes saved from Vectora Canvas.
