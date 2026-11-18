@@ -4076,3 +4076,50 @@ html[data-vc-accel="cpu"] * {
   color: #8c857e;
   font-family: var(--font-mono);
 }
+
+/* Responsive Topbar & Embedded Antigravity Sidecar Adaptation (1280px laptops + Sidecar Aux Pane) */
+@media (max-width: 1580px) {
+  .proj-label {
+    display: none;
+  }
+  #ddPage {
+    width: 96px;
+    min-width: 96px;
+    max-width: 96px;
+    flex: 0 0 96px;
+  }
+  #btnUndo > span:first-of-type,
+  #btnRedo > span:first-of-type,
+  .color-chip > span {
+    display: none;
+  }
+  .topbar .tb-btn,
+  .topbar .vc-dd-btn {
+    padding: 0 6px;
+    font-size: 11px;
+  }
+}
+
+@media (max-width: 1380px) {
+  .brand-name {
+    display: none;
+  }
+  #ddPreset {
+    display: none;
+  }
+  .workspace {
+    grid-template-columns: 212px 38px 1fr 256px;
+  }
+  .library-drawer {
+    width: 304px;
+  }
+}
+
+@media (max-width: 1080px) {
+  .workspace {
+    grid-template-columns: 182px 36px 1fr 236px;
+  }
+  .library-drawer {
+    width: 280px;
+  }
+}
