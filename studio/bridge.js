@@ -144,12 +144,47 @@
   // Clipboard (internal vector/HTML clipboard)
   let clipboardItems = [];
 
-  // Google Fonts & Theme CSS state
+  // Google Fonts, Theme CSS, Famous Style & Design Library state
   const loadedGoogleFonts = new Set();
   let activeThemeCss = '';
+  let activeFamousStyleCss = '';
+  let activeFamousStyleMeta = null;
+  let activeLibraryBaseCss = '';
+  let activeReplacedBodyHtml = '';
+  let activeTemplateId = '';
   let activePalette = { primary: '', secondary: '', extraCss: '', presetId: 'original' };
   let pendingThemeBefore = null;
   let pagePaletteProfile = null;
+
+  function applyFamousStyleTag(cssText) {
+    let tag = document.getElementById('__vc_famous_style__');
+    if (!cssText || !String(cssText).trim()) {
+      if (tag) tag.textContent = '';
+      return;
+    }
+    if (!tag) {
+      tag = document.createElement('style');
+      tag.id = '__vc_famous_style__';
+      tag.setAttribute('data-vc-bridge', 'true');
+      (document.head || document.documentElement).appendChild(tag);
+    }
+    tag.textContent = String(cssText);
+  }
+
+  function applyLibraryBaseTag(cssText) {
+    let tag = document.getElementById('__vc_library_base__');
+    if (!cssText || !String(cssText).trim()) {
+      if (tag) tag.textContent = '';
+      return;
+    }
+    if (!tag) {
+      tag = document.createElement('style');
+      tag.id = '__vc_library_base__';
+      tag.setAttribute('data-vc-bridge', 'true');
+      (document.head || document.documentElement).appendChild(tag);
+    }
+    tag.textContent = String(cssText);
+  }
 
   // Reversible History (NEVER cleared on Save!)
   const undoStack = [];
@@ -1122,9 +1157,9 @@
             }
           }
         }
-        if (el.classList && (el.classList.contains('field') || el.hasAttribute('data-vc-section'))) {
+        if (el.classList && (el.classList.contains('field') || el.classList.contains('vc-ui-card') || el.hasAttribute('data-vc-section') || el.hasAttribute('data-name'))) {
           rules.push(
-            `${hiSel} > .chips, ${hiSel} > textarea, ${hiSel} > .descbox, ${hiSel} > .fdetail, ${hiSel} > .fmulti { flex: 1 1 0 !important; min-height: 0px !important; max-height: none !important; }`
+            `${hiSel} > .chips, ${hiSel} > textarea, ${hiSel} > .descbox, ${hiSel} > .fdetail, ${hiSel} > .fmulti, ${hiSel} > p { min-height: 0px !important; max-height: none !important; }`
           );
         }
         const pField = el.parentElement;
@@ -1405,12 +1440,35 @@
           ensureGoogleFontLoadedInDom(f);
         });
         activeThemeCss = isUndo ? entry.beforeTheme : entry.afterTheme;
+        if (entry.beforeFamousCss !== undefined || entry.afterFamousCss !== undefined) {
+          activeFamousStyleCss = isUndo ? (entry.beforeFamousCss || '') : (entry.afterFamousCss || '');
+          activeFamousStyleMeta = isUndo ? (entry.beforeFamousMeta || null) : (entry.afterFamousMeta || null);
+          applyFamousStyleTag(activeFamousStyleCss);
+        }
         if (entry.beforePalette || entry.afterPalette) {
           const pal = isUndo ? entry.beforePalette : entry.afterPalette;
           activePalette = pal ? { ...pal } : { primary: '', secondary: '', extraCss: '', presetId: 'original' };
         }
         applyLiveThemeTag(activeThemeCss);
         syncPaletteToStudio();
+        break;
+      }
+      case 'body_template': {
+        const targetHtml = isUndo ? entry.beforeBodyHtml : entry.afterBodyHtml;
+        activeReplacedBodyHtml = isUndo ? (entry.beforeReplacedFlag || '') : (entry.afterReplacedFlag || '');
+        activeTemplateId = isUndo ? (entry.beforeTemplateId || '') : (entry.afterTemplateId || '');
+        const bridgeNodes = Array.from(document.body.children).filter((c) => isBridgeNode(c));
+        for (const ch of Array.from(document.body.children)) {
+          if (!isBridgeNode(ch)) ch.remove();
+        }
+        const temp = document.createElement('div');
+        temp.innerHTML = targetHtml || '';
+        const anchor = bridgeNodes[0] || null;
+        while (temp.firstChild) {
+          document.body.insertBefore(temp.firstChild, anchor);
+        }
+        selectedIds = [];
+        activeGroupSelectionId = null;
         break;
       }
     }
@@ -1730,7 +1788,12 @@
       insertedNodes,
       deletedTargets,
       googleFonts: Array.from(loadedGoogleFonts),
-      themeCss: activeThemeCss
+      themeCss: activeThemeCss,
+      famousStyleCss: activeFamousStyleCss,
+      famousStyle: activeFamousStyleMeta,
+      libraryBaseCss: activeLibraryBaseCss,
+      replaceBodyHtml: activeReplacedBodyHtml,
+      templateId: activeTemplateId
     };
   }
 
@@ -2351,8 +2414,17 @@
 
     let el = rawTarget;
 
-    // Promote inner SVG primitives (<path>, <rect>, <circle>, <g>, etc.) up to <svg> or interactive control
-    if (['PATH', 'G', 'CIRCLE', 'RECT', 'LINE', 'POLYLINE', 'POLYGON', 'DEFS', 'STOP', 'USE', 'TEXT', 'TSPAN'].includes(el.tagName.toUpperCase())) {
+    // Promote inner SVG primitives (<path>, <rect>, <circle>, <g>, etc.) up to <svg> ONLY when NOT in Direct Selection (A) and NOT isolated inside that <svg>!
+    const activeIsoPre = getActiveIsolation();
+    const isInsideIsolatedSvg =
+      activeIsoPre &&
+      activeIsoPre.kind === 'container' &&
+      getEl(activeIsoPre.id)?.tagName?.toUpperCase() === 'SVG';
+    if (
+      !directSubSelect &&
+      !isInsideIsolatedSvg &&
+      ['PATH', 'G', 'CIRCLE', 'RECT', 'LINE', 'POLYLINE', 'POLYGON', 'DEFS', 'STOP', 'USE', 'TEXT', 'TSPAN'].includes(el.tagName.toUpperCase())
+    ) {
       el = el.closest('svg') || el.parentElement;
     }
     if (!el || isBridgeNode(el)) return null;
@@ -3270,11 +3342,29 @@
   }
 
   function getArtboardMetrics() {
+    let effectiveH = artboardHeight;
+    try {
+      const htmlCs = document.documentElement ? getComputedStyle(document.documentElement) : null;
+      const bodyCs = document.body ? getComputedStyle(document.body) : null;
+      const isFixedViewportApp =
+        (htmlCs && htmlCs.overflowY === 'hidden') ||
+        (bodyCs && bodyCs.overflowY === 'hidden');
+      if (!isFixedViewportApp && document.documentElement) {
+        const docH = Math.max(
+          document.body ? document.body.scrollHeight : 0,
+          document.documentElement.scrollHeight || 0
+        );
+        if (docH > artboardHeight + 36) {
+          effectiveH = Math.min(12000, docH);
+        }
+      }
+    } catch (_) {}
     return {
       pasteboardW: artboardWidth,
-      pasteboardH: artboardHeight,
+      pasteboardH: effectiveH,
       artboardW: artboardWidth,
-      artboardH: artboardHeight,
+      artboardH: effectiveH,
+      naturalDocHeight: effectiveH,
       offsetX: 0,
       offsetY: 0
     };
@@ -4246,25 +4336,31 @@
     };
   }
 
-  function applyScaledDimensionsAndEffects(it, newW, newH, newTx, newTy, uniformFactor) {
+  function applyScaledDimensionsAndEffects(it, newW, newH, newTx, newTy, uniformFactor, axisOpts = {}) {
+    const lockW = axisOpts.lockW !== false;
+    const lockH = axisOpts.lockH !== false;
     const wVal = `${Math.max(4, Math.round(newW * 10) / 10)}px`;
     const hVal = `${Math.max(2, Math.round(newH * 10) / 10)}px`;
     it.el.style.boxSizing = 'border-box';
-    it.el.style.width = wVal;
-    it.el.style.height = hVal;
-    it.el.style.minWidth = '0px';
-    it.el.style.minHeight = '0px';
-    it.el.style.maxWidth = 'none';
-    it.el.style.maxHeight = 'none';
+    recordPatchedProp(it.el, 'box-sizing', 'border-box');
+    if (lockW) {
+      it.el.style.width = wVal;
+      it.el.style.minWidth = '0px';
+      it.el.style.maxWidth = 'none';
+      recordPatchedProp(it.el, 'width', wVal);
+      recordPatchedProp(it.el, 'min-width', '0px');
+      recordPatchedProp(it.el, 'max-width', 'none');
+    }
+    if (lockH) {
+      it.el.style.height = hVal;
+      it.el.style.minHeight = '0px';
+      it.el.style.maxHeight = 'none';
+      recordPatchedProp(it.el, 'height', hVal);
+      recordPatchedProp(it.el, 'min-height', '0px');
+      recordPatchedProp(it.el, 'max-height', 'none');
+    }
     it.el.style.flex = '0 0 auto';
     it.el.style.flexShrink = '0';
-    recordPatchedProp(it.el, 'box-sizing', 'border-box');
-    recordPatchedProp(it.el, 'width', wVal);
-    recordPatchedProp(it.el, 'height', hVal);
-    recordPatchedProp(it.el, 'min-width', '0px');
-    recordPatchedProp(it.el, 'min-height', '0px');
-    recordPatchedProp(it.el, 'max-width', 'none');
-    recordPatchedProp(it.el, 'max-height', 'none');
     recordPatchedProp(it.el, 'flex', '0 0 auto');
     recordPatchedProp(it.el, 'flex-shrink', '0');
 
@@ -4397,7 +4493,8 @@
           newH,
           it.origTx + offsetX,
           it.origTy + offsetY,
-          uniformFactor
+          uniformFactor,
+          { lockW: affectsW || ev.shiftKey, lockH: affectsH || ev.shiftKey }
         );
       }
     } else {
@@ -4422,7 +4519,8 @@
           newH,
           it.origTx + deltaLeft,
           it.origTy + deltaTop,
-          uniformFactor
+          uniformFactor,
+          { lockW: affectsW || ev.shiftKey, lockH: affectsH || ev.shiftKey }
         );
       }
     }
@@ -5939,6 +6037,70 @@
         }
       }
 
+      const tagUpPaint = el.tagName ? el.tagName.toUpperCase() : '';
+      const isSvgVectorNode = ['SVG', 'PATH', 'CIRCLE', 'RECT', 'LINE', 'POLYLINE', 'POLYGON', 'ELLIPSE', 'G'].includes(tagUpPaint);
+
+      if (isSvgVectorNode) {
+        // Pure Adobe Illustrator Vector Paint for <svg> & inner vector primitives (never paint an ugly square CSS box!)
+        if (unfillTarget === 'fill') {
+          if (tagUpPaint === 'SVG') {
+            el.querySelectorAll('path, circle, rect, polygon, ellipse').forEach((ch) => ch.setAttribute('fill', 'none'));
+          } else {
+            el.setAttribute('fill', 'none');
+          }
+          el.style.setProperty('fill', 'none');
+          recordPatchedProp(el, 'fill', 'none');
+        } else if (unfillTarget === 'stroke') {
+          if (tagUpPaint === 'SVG') {
+            el.querySelectorAll('path, circle, rect, line, polyline, polygon, ellipse').forEach((ch) => ch.setAttribute('stroke', 'none'));
+          } else {
+            el.setAttribute('stroke', 'none');
+          }
+          el.style.setProperty('stroke', 'none');
+          recordPatchedProp(el, 'stroke', 'none');
+        }
+        if (props && typeof props === 'object') {
+          if (props.backgroundColor && props.backgroundColor !== 'transparent' && unfillTarget !== 'fill') {
+            el.style.setProperty('color', String(props.backgroundColor));
+            recordPatchedProp(el, 'color', String(props.backgroundColor));
+            if (tagUpPaint !== 'SVG') {
+              el.setAttribute('fill', String(props.backgroundColor));
+              el.style.setProperty('fill', String(props.backgroundColor));
+              recordPatchedProp(el, 'fill', String(props.backgroundColor));
+            }
+          }
+          if (props.borderColor && unfillTarget !== 'stroke') {
+            el.style.setProperty('color', String(props.borderColor));
+            recordPatchedProp(el, 'color', String(props.borderColor));
+            if (tagUpPaint !== 'SVG') {
+              el.setAttribute('stroke', String(props.borderColor));
+              el.style.setProperty('stroke', String(props.borderColor));
+              recordPatchedProp(el, 'stroke', String(props.borderColor));
+            }
+          }
+          if (props.borderWidth !== undefined) {
+            const sw = parseFloat(props.borderWidth);
+            if (!Number.isNaN(sw)) {
+              el.setAttribute('stroke-width', String(sw));
+              el.style.setProperty('stroke-width', `${sw}px`);
+              recordPatchedProp(el, 'stroke-width', `${sw}px`);
+            }
+          }
+          for (const [k, v] of Object.entries(props)) {
+            if (['backgroundColor', 'backgroundImage', 'borderColor', 'borderWidth', 'borderStyle'].includes(k)) continue;
+            const kebab = k.replace(/[A-Z]/g, (m) => '-' + m.toLowerCase());
+            if (v === null || v === '') {
+              el.style.removeProperty(kebab);
+              recordPatchedProp(el, kebab, null);
+            } else {
+              el.style.setProperty(kebab, String(v));
+              recordPatchedProp(el, kebab, String(v));
+            }
+          }
+        }
+        continue;
+      }
+
       if (unfillTarget === 'fill') {
         el.setAttribute('data-vc-unfill-fill', '1');
         el.style.setProperty('background', 'none');
@@ -6757,7 +6919,7 @@
       const tagUp = levelHit.tagName.toUpperCase();
       const hasMixedTextAndElements =
         levelHit.children.length >= 1 &&
-        !['SVG', 'SELECT', 'INPUT', 'TEXTAREA', 'IMG', 'CANVAS', 'VIDEO'].includes(tagUp);
+        !['SELECT', 'INPUT', 'TEXTAREA', 'IMG', 'CANVAS', 'VIDEO'].includes(tagUp);
       if (hasMixedTextAndElements) {
         const cid = ensureVcId(levelHit);
         enterIsolationMode({ id: cid, kind: 'container', name: getCleanIsolationLabel(levelHit) }, null);
@@ -7641,6 +7803,199 @@
       case 'refresh_tree': {
         renderOverlays();
         sendTreeAndSelectionUpdate();
+        break;
+      }
+      case 'hot_reload_stylesheets': {
+        const ts = Date.now();
+        document.querySelectorAll('link[rel="stylesheet"]').forEach((lnk) => {
+          const rawHref = lnk.getAttribute('href') || '';
+          if (!rawHref || /^https?:\/\/fonts\.googleapis\.com/i.test(rawHref)) return;
+          const baseHref = rawHref.replace(/([?&])vc_hot=\d+(&?)/, (_m, p1, p2) => (p2 ? p1 : '')).replace(/[?&]$/, '');
+          const sep = baseHref.includes('?') ? '&' : '?';
+          lnk.setAttribute('href', `${baseHref}${sep}vc_hot=${ts}`);
+        });
+        setTimeout(() => {
+          renderOverlays();
+          sendTreeAndSelectionUpdate();
+        }, 90);
+        break;
+      }
+      case 'apply_famous_style': {
+        const beforeFonts = Array.from(loadedGoogleFonts);
+        const beforeFamousCss = activeFamousStyleCss;
+        const beforeFamousMeta = activeFamousStyleMeta;
+        const beforeTheme = activeThemeCss;
+        const beforePalette = { ...activePalette };
+
+        const fonts = Array.isArray(msg.googleFonts) ? msg.googleFonts : [];
+        fonts.forEach((f) => {
+          if (f) {
+            loadedGoogleFonts.add(f);
+            ensureGoogleFontLoadedInDom(f);
+          }
+        });
+        activeFamousStyleCss = String(msg.cssText || '');
+        activeFamousStyleMeta = msg.styleMeta || null;
+        applyFamousStyleTag(activeFamousStyleCss);
+        if (msg.primaryColor) activePalette.primary = msg.primaryColor;
+        if (msg.secondaryColor) activePalette.secondary = msg.secondaryColor;
+
+        pushHistoryStep({
+          label: activeFamousStyleMeta ? `Style: ${activeFamousStyleMeta.styleName}` : 'Reset Famous Style',
+          entries: [
+            {
+              kind: 'doc_meta',
+              beforeFonts,
+              afterFonts: Array.from(loadedGoogleFonts),
+              beforeTheme,
+              afterTheme: activeThemeCss,
+              beforeFamousCss,
+              afterFamousCss: activeFamousStyleCss,
+              beforeFamousMeta,
+              afterFamousMeta: activeFamousStyleMeta,
+              beforePalette,
+              afterPalette: { ...activePalette }
+            }
+          ]
+        });
+        renderOverlays();
+        sendTreeAndSelectionUpdate();
+        sendToStudio({ type: 'vc_page_metrics', artboardRect: getArtboardMetrics() });
+        break;
+      }
+      case 'insert_library_element': {
+        if (msg.libraryBaseCss) {
+          activeLibraryBaseCss = String(msg.libraryBaseCss);
+          applyLibraryBaseTag(activeLibraryBaseCss);
+        }
+        const temp = document.createElement('div');
+        temp.innerHTML = String(msg.html || '').trim();
+        const newEl = temp.firstElementChild;
+        if (!newEl) break;
+
+        let parent = document.querySelector('main') || document.body;
+        let nextSibling = null;
+        const entries = [];
+
+        if (selectedIds.length === 1) {
+          const selEl = getEl(selectedIds[0]);
+          if (selEl && selEl !== document.body && selEl !== document.documentElement) {
+            if (msg.replaceSelected && selEl.parentElement) {
+              parent = selEl.parentElement;
+              nextSibling = selEl.nextSibling;
+              const delVcId = ensureVcId(selEl);
+              const delRec = {
+                id: selEl.id && !selEl.id.startsWith('vc_') ? selEl.id : '',
+                selector: computeCleanSelector(selEl),
+                el: selEl,
+                parent: selEl.parentNode,
+                nextSibling: selEl.nextSibling
+              };
+              if (!createdElements.has(selEl)) deletedStaticRecords.set(delVcId, delRec);
+              entries.push({ kind: 'delete', el: selEl, parent: selEl.parentNode, nextSibling: selEl.nextSibling, vcId: delVcId, staticRec: !createdElements.has(selEl) ? delRec : null });
+              selEl.remove();
+            } else if (['SECTION', 'MAIN', 'HEADER', 'FOOTER', 'ASIDE', 'DIV', 'ARTICLE'].includes(selEl.tagName.toUpperCase()) && selEl.children.length > 0 && !selEl.classList.contains('vc-btn-primary')) {
+              parent = selEl;
+              nextSibling = null;
+            } else if (selEl.parentElement) {
+              parent = selEl.parentElement;
+              nextSibling = selEl.nextElementSibling;
+            }
+          }
+        }
+        if (parent === document.body) {
+          const firstBridge = Array.from(document.body.children).find((c) => isBridgeNode(c));
+          if (!nextSibling) nextSibling = firstBridge || null;
+        }
+        parent.insertBefore(newEl, nextSibling);
+        createdElements.add(newEl);
+        const newVcId = ensureVcId(newEl);
+        entries.push({ kind: 'insert', el: newEl, parent, nextSibling });
+        selectedIds = [newVcId];
+        activeGroupSelectionId = null;
+
+        pushHistoryStep({
+          label: `Insert ${msg.itemName || 'UI Element'}`,
+          entries
+        });
+        renderOverlays();
+        sendTreeAndSelectionUpdate();
+        sendToStudio({ type: 'vc_page_metrics', artboardRect: getArtboardMetrics() });
+        break;
+      }
+      case 'apply_premade_template': {
+        if (msg.libraryBaseCss) {
+          activeLibraryBaseCss = String(msg.libraryBaseCss);
+          applyLibraryBaseTag(activeLibraryBaseCss);
+        }
+        const beforeBodyNodes = Array.from(document.body.children).filter((c) => !isBridgeNode(c) && c.tagName.toUpperCase() !== 'SCRIPT');
+        const beforeBodyHtml = beforeBodyNodes.map((n) => n.outerHTML).join('\n');
+        const beforeReplacedFlag = activeReplacedBodyHtml;
+        const beforeTemplateId = activeTemplateId;
+        const beforeFonts = Array.from(loadedGoogleFonts);
+        const beforeFamousCss = activeFamousStyleCss;
+        const beforeFamousMeta = activeFamousStyleMeta;
+
+        for (const n of beforeBodyNodes) n.remove();
+        const temp = document.createElement('div');
+        temp.innerHTML = String(msg.bodyHtml || '').trim();
+        const firstAnchor = Array.from(document.body.children).find((c) => isBridgeNode(c) || c.tagName.toUpperCase() === 'SCRIPT') || null;
+        while (temp.firstChild) {
+          document.body.insertBefore(temp.firstChild, firstAnchor);
+        }
+
+        activeReplacedBodyHtml = String(msg.bodyHtml || '').trim();
+        activeTemplateId = String(msg.templateId || '');
+
+        if (Array.isArray(msg.googleFonts)) {
+          msg.googleFonts.forEach((f) => {
+            if (f) {
+              loadedGoogleFonts.add(f);
+              ensureGoogleFontLoadedInDom(f);
+            }
+          });
+        }
+        if (msg.famousStyleCss !== undefined) {
+          activeFamousStyleCss = String(msg.famousStyleCss || '');
+          activeFamousStyleMeta = msg.styleMeta || null;
+          applyFamousStyleTag(activeFamousStyleCss);
+        }
+
+        selectedIds = [];
+        activeGroupSelectionId = null;
+        const entries = [
+          {
+            kind: 'body_template',
+            beforeBodyHtml,
+            afterBodyHtml: activeReplacedBodyHtml,
+            beforeReplacedFlag,
+            afterReplacedFlag: activeReplacedBodyHtml,
+            beforeTemplateId,
+            afterTemplateId: activeTemplateId
+          },
+          {
+            kind: 'doc_meta',
+            beforeFonts,
+            afterFonts: Array.from(loadedGoogleFonts),
+            beforeTheme: activeThemeCss,
+            afterTheme: activeThemeCss,
+            beforeFamousCss,
+            afterFamousCss: activeFamousStyleCss,
+            beforeFamousMeta,
+            afterFamousMeta: activeFamousStyleMeta,
+            beforePalette: { ...activePalette },
+            afterPalette: { ...activePalette }
+          }
+        ];
+        pushHistoryStep({
+          label: `Apply Template: ${msg.templateName || 'UI Template'}`,
+          entries
+        });
+        setTimeout(() => {
+          renderOverlays();
+          sendTreeAndSelectionUpdate();
+          sendToStudio({ type: 'vc_page_metrics', artboardRect: getArtboardMetrics() });
+        }, 60);
         break;
       }
       case 'agent_live_exec': {

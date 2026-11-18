@@ -92,6 +92,11 @@
         </div>
       </div>
       <input type="file" id="inpFolderPicker" webkitdirectory directory multiple hidden>
+
+      <button type="button" class="tb-btn lib-top-btn" id="btnOpenLibrary" title="Famous Styles, Famous UI Elements &amp; Premade UI Templates (Shortcut: L)">
+        <svg viewBox="0 0 16 16" width="13" height="13"><rect x="2" y="2" width="5" height="5" rx="1.1" fill="none" stroke="currentColor" stroke-width="1.4"/><rect x="9" y="2" width="5" height="5" rx="1.1" fill="none" stroke="currentColor" stroke-width="1.4"/><rect x="2" y="9" width="5" height="5" rx="1.1" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M11.5 9v5M9 11.5h5" stroke="#f97316" stroke-width="1.6" stroke-linecap="round"/></svg>
+        <span>Styles &amp; UI</span>
+      </button>
     </div>
 
     <!-- CENTER: LIVE/EDIT + GATE BYPASS + UNDO/REDO + SAVE / AUTO SAVE / ORIGINAL + NOTES -->
@@ -131,13 +136,16 @@
 
       <div class="tb-sep"></div>
 
-      <!-- SAVING & HISTORY: Save button (manual click only) + Auto Save label + clickable Original button -->
+      <!-- SAVING & REAL-TIME CODING AGENT SYNC: Save + Live Sync Toggle + Original + Temp Preview -->
       <div class="save-group">
-        <button type="button" class="tb-btn primary" id="btnSave" title="Save changes directly to HTML file (Ctrl+S) and update Original state">
+        <button type="button" class="tb-btn primary" id="btnSave" title="Save &amp; commit checkpoint directly to HTML/CSS/JS files (Ctrl+S) and sync with Coding Agent">
           <svg viewBox="0 0 16 16" width="13" height="13"><path d="M3 2.5h8.2L13.5 4.8V13a.8.8 0 0 1-.8.8H3.3a.8.8 0 0 1-.8-.8V3.3a.8.8 0 0 1 .8-.8Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M5.2 2.5v3.8h5.2V2.5M5 13.8V9.2h6v4.6" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>
           <span>Save</span>
         </button>
-        <span class="autosave-label" id="autoSaveLabel" title="Manual Save active — edits save only when you click Save">Auto Save</span>
+        <button type="button" class="autosave-label live-sync-btn active" id="autoSaveLabel" aria-pressed="true" title="Live Sync ON — every canvas, style, or template edit updates HTML/CSS &amp; Coding Agent in real time (Click to toggle)">
+          <span class="live-sync-dot"></span>
+          <span id="autoSaveLabelText">Live Sync</span>
+        </button>
         <button type="button" class="tb-btn original-btn active" id="btnOriginal" title="Revert to last Saved / Original baseline state (Undoable)">Original</button>
       </div>
 
@@ -147,9 +155,10 @@
         <span class="note-cnt-pill" id="topNoteCount">0</span>
       </button>
 
-      <button type="button" class="tb-btn publish-top-btn" id="btnPublishPage" title="Publish — Open the full clean live page in a new tab">
+      <button type="button" class="tb-btn publish-top-btn temp-preview-btn" id="btnPublishPage" title="Temporary Live Verification Preview — Opens a clean temporary test tab (auto-reloads on agent/canvas edits)">
+        <span class="temp-live-dot" id="tempPreviewDot" hidden></span>
         <svg viewBox="0 0 16 16" width="13" height="13"><path d="M9.5 2.5h4v4M13.3 2.7L7.4 8.6" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"/><path d="M12.5 9.2v3.3a1 1 0 0 1-1 1h-8a1 1 0 0 1-1-1v-8a1 1 0 0 1 1-1h3.3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        <span>Publish</span>
+        <span id="btnPublishLabel">Temp Preview</span>
       </button>
     </div>
 
@@ -307,6 +316,10 @@
       </button>
       <button type="button" class="ai-tool ai-action-btn" id="btnDockAddImage" title="Import Reference Design Image (or Paste with Ctrl+V / Drag &amp; Drop)">
         <svg viewBox="0 0 20 20" width="15" height="15"><rect x="2.8" y="3.8" width="14.4" height="12.4" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.45"/><circle cx="7.2" cy="8" r="1.4" fill="currentColor"/><path d="M3.5 14.4l4-3.8 3 2.8 2.6-2.4 3.4 3.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <button type="button" class="ai-tool ai-action-btn" id="btnDockLibrary" title="Design Library — Famous Styles, Famous UI Elements &amp; Premade Templates (Shortcut: L)">
+        <svg viewBox="0 0 20 20" width="15" height="15"><rect x="2.6" y="2.8" width="6.2" height="6.2" rx="1.3" fill="none" stroke="currentColor" stroke-width="1.45"/><rect x="11.2" y="2.8" width="6.2" height="6.2" rx="1.3" fill="none" stroke="currentColor" stroke-width="1.45"/><rect x="2.6" y="11.2" width="6.2" height="6.2" rx="1.3" fill="none" stroke="currentColor" stroke-width="1.45"/><path d="M14.3 11.2v6.2M11.2 14.3h6.2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        <span class="k-hint">L</span>
       </button>
       <button type="button" class="ai-tool" data-tool="hand" id="toolHand" title="Hand Tool (H, Middle-Click Drag, or Space+Drag)">
         <svg viewBox="0 0 20 20" width="15" height="15"><path d="M7.5 9.5V4.8a1 1 0 0 1 2 0V9m0 0V3.8a1 1 0 0 1 2 0V9m0 0V4.8a1 1 0 0 1 2 0v4.8m0 0V6.8a1 1 0 0 1 2 0v5.7a5 5 0 0 1-5 5H8.8a4.5 4.5 0 0 1-3.8-2.1l-1.8-2.9a1.1 1.1 0 0 1 1.8-1.2l1.5 1.5V9.5Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
@@ -556,6 +569,37 @@
         <div class="nd-sub" id="notesAgentSyncStatus">Marked area + note auto-synced to Coding Agent · Outside HTML</div>
         <div class="nd-list" id="notesDrawerList"></div>
       </aside>
+
+      <!-- DESIGN LIBRARY DRAWER: FAMOUS STYLES, FAMOUS UI ELEMENTS & PREMADE TEMPLATES -->
+      <aside class="library-drawer" id="libraryDrawer" hidden aria-label="Famous Styles, Elements and UI Templates">
+        <div class="ld-head">
+          <span class="ld-head-title">
+            <svg viewBox="0 0 16 16" width="13" height="13"><rect x="2" y="2" width="5" height="5" rx="1.1" fill="none" stroke="#f97316" stroke-width="1.4"/><rect x="9" y="2" width="5" height="5" rx="1.1" fill="none" stroke="currentColor" stroke-width="1.4"/><rect x="2" y="9" width="5" height="5" rx="1.1" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M11.5 9v5M9 11.5h5" stroke="#f97316" stroke-width="1.5" stroke-linecap="round"/></svg>
+            <span>Design Studio Library</span>
+          </span>
+          <div class="inline-actions">
+            <button type="button" class="mini-btn" id="btnResetFamousStyle" hidden title="Restore original project theme">Reset Style</button>
+            <button type="button" class="mini-icon-btn" id="btnCloseLibraryDrawer" aria-label="Close Library">
+              <svg viewBox="0 0 12 12" width="11" height="11"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="ld-tabs" role="tablist">
+          <button type="button" class="ld-tab active" data-ltab="styles" id="lTabStyles">Famous Styles</button>
+          <button type="button" class="ld-tab" data-ltab="elements" id="lTabElements">UI Elements</button>
+          <button type="button" class="ld-tab" data-ltab="templates" id="lTabTemplates">Templates</button>
+        </div>
+        <div class="ld-search-row">
+          <input type="text" id="inpLibrarySearch" class="prop-input" placeholder="Search styles, elements, or templates…">
+          <label class="tiny-chk ld-swap-chk" id="lblLibSwapSelected" hidden title="Replace the currently selected element on the artboard instead of appending">
+            <input type="checkbox" id="chkLibReplaceSelected">
+            <span>Swap Sel</span>
+          </label>
+        </div>
+        <div class="ld-cats" id="libraryCatRow" hidden></div>
+        <div class="ld-sub-hint" id="librarySubHint">Click any Famous Style to transform the Coding Agent's UI in real time.</div>
+        <div class="ld-list" id="libraryItemsList"></div>
+      </aside>
     </section>
 
     <!-- COLUMN 4: RIGHT INSPECTOR (AIRSHIP TABS: EDIT | CSS | DOM + ILLUSTRATOR PANELS) -->
@@ -743,11 +787,18 @@
           </div>
         </section>
 
-        <!-- 4. LAYOUT & SPACING (CLEAN SIMPLE COLORS, SCRUBBY NUMBER FIELDS, FULL UNDO/REDO) -->
+        <!-- 4. LAYOUT & SPACING (CLEAN SIMPLE COLORS, SCRUBBY NUMBER FIELDS, FIGMA HUG/FILL/FLOW, FULL UNDO/REDO) -->
         <section class="panel-sec">
           <div class="sec-head">
             <span>Layout &amp; Spacing</span>
             <button type="button" class="mini-btn" id="btnResetElement" title="Reset element inline styles">Reset</button>
+          </div>
+          <div class="figma-flow-strip" id="figmaQuickFlowBar">
+            <button type="button" class="mini-btn" data-qflow="hug-w" title="Figma Hug Width (width: fit-content)">Hug W</button>
+            <button type="button" class="mini-btn" data-qflow="fill-w" title="Figma Fill Width (width: 100%)">Fill W</button>
+            <button type="button" class="mini-btn" data-qflow="hug-h" title="Figma Auto/Hug Height (height: auto)">Auto H</button>
+            <button type="button" class="mini-btn" data-qflow="flex-row" title="Auto-Layout Horizontal Row (display: flex; flex-direction: row)">Row</button>
+            <button type="button" class="mini-btn" data-qflow="flex-col" title="Auto-Layout Vertical Stack (display: flex; flex-direction: column)">Col</button>
           </div>
           <div class="prop-grid-2">
             <div class="scrub-row" data-scrub-for="propPadding" data-step="1" data-min="0" data-unit="px">
@@ -1482,6 +1533,7 @@
   <div class="vc-toast" id="vcToast" hidden></div>
 
   <script src="./code-sync.js"></script>
+  <script src="./design-library.js"></script>
   <script src="./studio.js"></script>
 </body>
 </html>

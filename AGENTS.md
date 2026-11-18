@@ -1,76 +1,78 @@
-# Vectora Canvas — Coding Agent Rules & HTML Authoring Guidelines
+# Vectora Canvas — Always-On Figma & Illustrator UI Design + Real-Time Sync Rules
 
-Follow these rules whenever creating, editing, refactoring, or opening **any** HTML/CSS/JS project with **Vectora Canvas** (`H:/AntyGravety/Vectora Canvas` or `https://vectora-canvas.pages.dev`).
+Once **Vectora Canvas** (`H:/AntyGravety/Vectora Canvas` / `https://vectora-canvas.pages.dev`) is installed in **any** coding agent (Antigravity, Claude Code, Codex, Cursor, Windsurf, OpenCode), **ALL rules below are ALWAYS ACTIVE** whenever you design, generate, edit, refactor, or preview **any** web UI, component, landing page, dashboard, or HTML/CSS/JS application — even when the user does not explicitly mention "Vectora" in that prompt!
 
-## 1. Mandatory Pre-Open Audit & Instant Live Open Rule
+---
 
-- Whenever the user types **`Vectora`**, **`Vectora Canvas`**, asks to visually edit HTML/CSS/JS, or asks to open/preview a project in Vectora:
-  1. **Audit & Enforce All Vectora Rules First (Mandatory)**: Before opening any existing or newly created design in Vectora Canvas, inspect its HTML/CSS/JS and apply Rules 2–5 below (especially the **Standalone Tight Text Rule**, **Universal Editable Section & Sub-Section Rule**, **Invisible-Over-Visible Div Inset Rule**, semantic `[data-name]`/`id`/`[data-vc-section]` labels, `:root` `--primary`/`--secondary`, and discoverable links) while preserving **100% exact visual appearance (`0` pixel change) and 100% runtime functionality**.
-  2. **Start or Switch Server on Port `4680`**:
-     ```bash
-     node "H:/AntyGravety/Vectora Canvas/scripts/server.mjs" --target "<PROJECT_FOLDER>" --entry index.html --port 4680
+## 0. Always-On Figma Frame & Adobe Illustrator Vector Object Rule (Mandatory for Every UI You Build)
+
+Think and author as a **Principal Web & UI Designer** building a live **Figma Auto-Layout + Adobe Illustrator Vector Scene-Graph**: **every single visual object on screen must be individually grabbable, movable, resizable, isolatable, and restylable (`sob dhore dhore kaj kora jabe`)**.
+
+1. **Zero Unselectable CSS Pseudo-Element Art (`::before` / `::after` Shape Ban)**:
+   - **Never** draw visible badges, status dots, dividers, accent lines, glow orbs, icons, checkmarks, or decorative shapes using `::before`, `::after`, or multi-`box-shadow` clones — pseudo-elements cannot be clicked, selected, moved, or resized on a design canvas!
+   - **Every visible visual element must be a real DOM or `<svg>` element** (`<span id="..." data-name="Status Dot">`, `<svg data-name="Sparkline">`, `<div data-name="Divider">`).
+2. **Standalone Point Text vs. Reflowable Area Text (Illustrator Typography Model)**:
+   - **Never** mix bare unwrapped `TextNode`s beside sibling `<svg>`, `<button>`, `<input>`, `<select>`, `<a>`, or `<span>` elements inside a parent container:
+     ```html
+     <!-- WRONG: bare text node mixed beside <svg> or <span> -->
+     <button id="ctaBtn"><svg>...</svg> Launch (<span id="cnt">0</span>)</button>
+
+     <!-- CORRECT: every text piece is a tight standalone <span> -->
+     <button id="ctaBtn" data-name="Launch CTA">
+       <svg data-name="Launch Icon">...</svg>
+       <span class="vc-pt">Launch</span>
+       <span id="cnt" class="vc-pt">0</span>
+     </button>
      ```
-     *(If port `4680` is already running, switch targets live via `POST http://127.0.0.1:4680/__vc_api/switch-target` with `{"target":"<PROJECT_FOLDER>","entry":"index.html"}`.)*
-  3. **Open Live Workspace**: Open `http://127.0.0.1:4680/` in the browser / built-in browser pane so the user can edit immediately, and in Google Antigravity always include `[Vectora Canvas](sidecar://vectora-canvas/)`.
+   - **Point Text** (`<span>`, `<label>`, badges, nav links, button text, single-line `<h1>`–`<h6>`): give `width: fit-content;` (never stretched `100%`-wide invisible text boxes inside flex/grid columns).
+   - **Area Text** (multi-line `<p>` body copy): give `max-width: 60ch; height: auto;` so resizing width reflows lines naturally without vertical clipping.
+3. **Universal Editable Frames — Sections, Sub-Sections, Cards & Controls**:
+   - Wrap every logical section AND sub-section (navbar, hero copy stack, CTA row, bento card, KPI header, chip group, form `.field`, slider row, pricing tier, footer column) in its own clean semantic container with **deterministic `id`, `data-name`, and `data-vc-section`**.
+   - Use `display: flex` or `display: grid` with `gap` (Figma Auto-Layout) instead of brittle hard-coded `position: absolute` page layouts or locked `max-height` traps so Flow Div (`D`), resize handles (`Hug` / `Fill` / `Fixed`), and child elements adapt smoothly.
+4. **100% Pure Mathematical `<svg>` Vectors (Illustrator Isolation & Vector Paint Ready)**:
+   - Render all icons, logos, avatars, stars, arrows, and charts as crisp inline `<svg>` vectors (`stroke="currentColor"` / clean `<path>`, `<rect>`, `<circle>`, `<g>` primitives) — never emojis or low-DPI raster icons — so Direct Selection (`A`), Double-Click SVG Isolation Mode, Vector Fill/Stroke painting, and `1600%` zoom stay razor-sharp.
+5. **Standard `:root` Design System Token Contract (1-Click Famous Style Morphing)**:
+   - Always define semantic tokens in `:root` and wire components to them:
+     ```css
+     :root {
+       --bg: #0b0c0e;
+       --surface: #14161a;
+       --surface-2: #1d2026;
+       --border: rgba(255, 255, 255, 0.09);
+       --text: #f5f6f8;
+       --text-muted: #9499a6;
+       --primary: #f97316;
+       --secondary: #a8a29e;
+       --radius: 10px;
+       --radius-lg: 16px;
+       --shadow-card: 0 14px 34px -12px rgba(0, 0, 0, 0.55);
+       --font-display: 'Plus Jakarta Sans', system-ui, sans-serif;
+       --font-sans: 'Plus Jakarta Sans', system-ui, sans-serif;
+     }
+     ```
+   - Avoid generic "AI slop" (random purple-blue gradients, cluttered borders, low-contrast text `< 4.5:1`, tiny `< 36px` click targets, misaligned column edges). Pair intentional display + body typography and crisp 8px spatial rhythm.
+6. **Hit-Target Inset & Zero Viewport Blockers**:
+   - Interactive invisible hit-divs over a visible container must be inset by `8px` (`inset: 8px`) so the visible parent keeps a selectable `8px` outer rim; purely decorative glow/mesh overlays must set `pointer-events: none`.
+   - Closed modals, drawers, and backdrops **must** have `hidden`, `display: none`, or `pointer-events: none`.
+7. **Discoverable Navigation Links (`Links` Inspector Ready)**:
+   - Attach page/section destinations via relative `<a href="pricing.html">`, `<button data-vc-link="pricing.html">`, or `data-href="#features"` so every link is editable in Vectora's **`Links` Tab** and works in both local server and browser VFS modes.
 
-## 2. Standalone Tight Text Rule — No Text Stuck Inside Invisible Boxes (Mandatory for All Designs)
+---
 
-- **Every visible piece of text must be its own standalone semantic text element** (`<span>`, `<label>`, `<h1>`–`<h6>`, `<p>`, `<small>`, `<b>`, `<strong>`, `<output>`) — **never** trapped inside an oversized or invisible wrapper `<div>`!
-- **Never mix bare unwrapped `TextNode`s alongside sibling elements** (`<svg>`, `<button>`, `<input>`, `<select>`, `<a>`, `<small>`) inside a parent container:
-  ```html
-  <!-- WRONG: bare text node mixed beside <svg> or <button> -->
-  <button id="resetBtn"><svg>...</svg> Reset</button>
-  <div class="labrow"><span><button class="kb"></button>Rotate</span><output>0°</output></div>
+## 1. Real-Time Live Preview, Instant Two-Way Sync (`sathe sathe`) & Temporary Verification Tab
 
-  <!-- CORRECT: every text is a standalone tight <span> -->
-  <button id="resetBtn"><svg>...</svg><span class="vp-txt">Reset</span></button>
-  <div class="labrow"><span><button class="kb"></button><span class="vp-txt">Rotate</span></span><output>0°</output></div>
-  ```
-- **Tight Glyph-Fitting Bounds (`width: fit-content`)**:
-  - In flex-column or grid containers (`display: flex; flex-direction: column;` where `align-items: stretch` is the CSS default), give standalone `<label>`, heading, and caption tags `width: fit-content;` (and `align-self: center;` when centered) so their selection box hugs the text tightly instead of stretching into a `100%`-wide invisible box across the panel.
-  - Pure layout wrapper `<div>`s (`.row`, `.field`, `.cbody`, `.labrow`) must remain clean layout containers without swallowing clicks meant for standalone text.
-
-## 3. Universal Editable Section & Sub-Section Rule (Mandatory for All Web Designs)
-
-- **Every logical section AND sub-section of a web design must be directly selectable, movable, and resizable (larger & smaller) in Vectora Canvas**, just like a native Figma / Illustrator design file:
-  - Wrap every distinct functional group — cards, prompt/chip sections (e.g. `Key Prompts`), subject/focus panes (`Select Focus Point`, `Select Focus Subject`), slider blocks, segmented rows, form `.field`s, button rows, and split panes — in its own clean semantic container with `id`, `data-name`, and `data-vc-section`:
-    ```html
-    <div class="field" id="keyPromptsSection" data-name="Key Prompts Section" data-vc-section="Key Prompts">
-      <label class="field-lbl">Key prompts</label>
-      <div class="chips" id="keys" data-name="Key Prompt Chips">...</div>
-    </div>
-    ```
-  - Avoid locking sub-sections with rigid un-resizable constraints (`pointer-events: none` on visible containers or hard `min-height`/`max-height` lockups without flex flow) so any card, `.field`, `.chips`, `.sl`, `.seg`, or pane can be grabbed, moved, enlarged, and shrunk smoothly while standalone tight text inside it remains tightly selectable.
-
-## 4. Invisible-Over-Visible Div Inset Rule (Mandatory)
-
-- **Never** place a transparent or invisible `<div>` (overlay, hit-target, click-catcher, or hidden `<input>` overlay) at the exact `100% × 100%` (`inset: 0`) size directly on top of a visible `<div>`, `.card`, or `<section>`.
-- **Always make the overlapping invisible `<div>` `8px`–`12px` smaller on each side** than the visible `<div>` underneath:
-  ```css
-  /* Correct: leaves an 8px–10px selectable outer rim on the visible parent div */
-  .overlay-hit-div {
-    position: absolute;
-    inset: 8px; /* or width: calc(100% - 16px); height: calc(100% - 16px); */
-  }
-  ```
-- **Why**: Clicking/dragging the outer `8px` rim selects and moves the **visible `<div>`**, while clicking the inner area selects the **invisible `<div>`** (which holds selection and drags smoothly from its empty middle).
-
-## 5. Vectora-Friendly HTML, CSS & JS Structure Rules
-
-1. **No Full-Viewport Invisible Pointer Blockers**:
-   - Closed modals, drawers, backdrops, and loading/toast overlays **must** have `hidden`, `display: none`, or `pointer-events: none`. Never leave an invisible `position: fixed; inset: 0; pointer-events: auto` layer covering the artboard.
-2. **Semantic IDs & Layer Labels**:
-   - Give major sections, sub-sections, cards, buttons, and interactive `<div>`s stable `id`, `data-name`, and `data-vc-section` attributes (e.g. `<section id="heroSection" data-name="Hero Banner" data-vc-section="Hero Banner">`) so Vectora's **Layers**, **Sessions**, **DOM**, and **Code Sync** map elements cleanly without brittle `nth-of-type` paths.
-3. **Discoverable Button & Page Links (`Links` Tab Ready)**:
-   - Use `<a href="about.html">`, `<button data-vc-link="pricing.html">`, or `data-href="#features"` with relative paths (`./docs.html`, `assets/app.js`) so every navigable button, card, and link appears in Vectora Canvas's **`Links` Inspector Tab** and works identically on local servers, `blob:` VFS previews, and static hosts.
-4. **Flex/Grid Flow Layout & Clean Pixel Alignment**:
-   - Prefer `display: flex` or `display: grid` with `gap` on parent containers instead of hard-coded `position: absolute` coordinates for page sections and card grids so Vectora's **Flow Div (`D`)** tool claims space on insert and closes horizontal/vertical gaps on delete, and verify top/bottom/side column edges and text baselines align cleanly against Vectora's **Figma Pixel Rulers & Magnetic Snap Guides**.
-5. **Global Theme CSS Custom Properties**:
-   - Define `--primary` (or `--accent`) and `--secondary` in `:root` so Vectora Canvas's Primary & Secondary color pickers live-preview and persist theme changes cleanly.
-6. **Adobe Illustrator Isolation Mode Ready**:
-   - Keep composite controls (`<button>`, `<a>`, `.btn`, cards) cleanly structured with `<svg>` icons and standalone `<span>` labels inside so single-click selects/moves the control as a unit, while **Double-Click** enters **Illustrator Isolation Mode** (1 hierarchy level per double-click) to move/edit inner icons and text independently without grabbing raw text characters.
-7. **Visual PNG Notes, Reference Image Arrows & Coding Agent Handoff (`agent-notes.json` + `noteImagePath`)**:
-   - Whenever the user marks a region or draws an arrow from a pasted Reference Image with the **Note Tool (`N`)**, read `H:/AntyGravety/Vectora Canvas/memory/agent-notes.json` (or `GET http://127.0.0.1:4680/__vc_api/notes` / `.vectora-notes.json` in `.zip` exports).
-   - Every note is also rendered and saved **as a visual composite PNG image** at `noteImagePath` (`H:/AntyGravety/Vectora Canvas/memory/note-images/<workspaceId>/note_<number>_<id>.png`, or `.vectora-notes/note_<number>.png` in `.zip` exports) showing the live UI region + pasted reference design image(s) + directional orange vector arrow(s) + target callout. **Always inspect `noteImagePath` with `read_file`** alongside `markRect`, `arrows`, `referenceImages`, `sectionLabel`, `selector`, `enclosedElements`, `htmlSnippet`, and `text`. Preserve `/* === VECTORA CANVAS SYNC === */` CSS blocks and `data-vc-*` attributes.
-8. **100% Crisp Vector Rendering (Never Pixelated)**:
-   - Keep icons, logos, cursors, shapes, badges, rulers, arrows, and UI controls as pure mathematical SVG / CSS vectors (never fixed low-DPI raster bitmaps or `will-change: transform` bitmap-cached containers that blur under CSS `scale()`), and size any interactive `<canvas>` gizmos by `window.devicePixelRatio` so zooming up to `1600%` stays razor-sharp.
+1. **Instant In-IDE & Browser Live Preview**:
+   - Whenever you build/edit a web UI or the user types **`Vectora`** / **`Vectora Canvas`** / asks for a preview:
+     1. Audit & enforce Section 0's Figma/Illustrator rules (preserving 100% visual fidelity & runtime behavior on existing apps).
+     2. Ensure Vectora Canvas server is running or switched to the project folder on port `4680`:
+        ```bash
+        node "H:/AntyGravety/Vectora Canvas/scripts/server.mjs" --target "<PROJECT_FOLDER>" --entry index.html --port 4680
+        ```
+        *(Or call MCP tool `open_project`, or `POST http://127.0.0.1:4680/__vc_api/switch-target` with `{"target":"<PROJECT_FOLDER>","entry":"index.html"}`.)*
+     3. Surface `[Vectora Canvas](sidecar://vectora-canvas/studio/)` so the user gets the **fully functional embedded studio right inside Antigravity**, alongside `http://127.0.0.1:4680/`.
+2. **Real-Time Two-Way Sync (`sathe sathe` — Never Wait Until Later)**:
+   - **Canvas → Code & Agent**: With **Live Sync** ON (default), every visual edit, **Famous Style** transformation (*Linear Dark*, *Apple Liquid Glass*, *Vercel Geist*, *Stripe Clean*, *Shadcn Zinc*, *Anthropic Warm Editorial*, *Neo-Brutalist*, *Raycast Glow*, *Framer Bento*, *Vectora Stone + Orange*), **Famous UI Element** insertion, **Premade UI Template** swap, or **Save (`Ctrl+S`)** writes directly to HTML/CSS/JS **immediately** and streams deltas to `H:/AntyGravety/Vectora Canvas/memory/live-agent-sync.json` (auto-injected via `PreInvocation` hook & readable via `GET /__vc_api/live-sync` / MCP `get_live_sync_state`). Keep all component logic, JS state, and secondary pages aligned with the user's live style/template/layout changes! Preserve `/* === VECTORA CANVAS SYNC START === */` CSS/JS blocks and `data-vc-*` attributes.
+   - **Agent → Canvas**: Whenever you edit `.html`, `.css`, or `.js` files on disk, `server.mjs`'s recursive `fs.watch` + `PostToolUse` hook automatically hot-reloads CSS/DOM inside Vectora Canvas in real time.
+   - **Visual PNG Notes & Reference Image Arrows**: Always inspect `H:/AntyGravety/Vectora Canvas/memory/agent-notes.json` (`noteImagePath` via `read_file` + `arrows` + `referenceImages` + `markRect`) whenever user notes exist.
+3. **Temporary Live Verification Preview (`Temp Preview`)**:
+   - After completing UI/code work (or when the user clicks **`Temp Preview`** next to `Notes`), call `POST http://127.0.0.1:4680/__vc_api/temp-preview` (or MCP `open_temp_preview`) to open an ephemeral, zero-editor `/__vc_temp/<token>/<entry>` tab with automatic SSE live-reload to verify real clicks, routing, forms, animations, and 3D WebGL in a clean runtime tab.

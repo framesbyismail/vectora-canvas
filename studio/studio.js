@@ -143,13 +143,20 @@
     effectiveAccel: 'gpu',
     gpuInfo: { webglAvailable: true, hasHardwareGpu: true, renderer: 'GPU Compositor', api: 'WebGL2' },
     preferences: {
-      autoSave: false, // Manual Save ONLY when clicked by default!
+      autoSave: true, // Real-Time Live Sync ON by default!
       scaleStrokesAndEffects: true,
       scaleCorners: true,
       multiScaleMode: 'in-place', // 'in-place' | 'normal'
       keyboardIncrement: 1,
       accelPreference: 'auto' // 'auto' (GPU -> CPU fallback) | 'gpu' | 'cpu'
     },
+    libraryTab: 'styles', // 'styles' | 'elements' | 'templates'
+    libraryCategory: 'All',
+    librarySearch: '',
+    activeFamousStyleId: '',
+    lastLibraryAction: null,
+    activeTempPreviewToken: '',
+    lastTempBlobUrl: '',
     ignoredWords: [],
     notes: [],
     editingNote: null,
@@ -485,9 +492,17 @@
   // =========================================================================
   let activePanSession = null;
 
+  function getEffectiveArtboardHeight() {
+    const baseH = Math.max(1, state.artboardHeight || 1080);
+    const natH = state.artboardMetrics && Number(state.artboardMetrics.naturalDocHeight) > 0
+      ? Number(state.artboardMetrics.naturalDocHeight)
+      : baseH;
+    return Math.max(baseH, natH);
+  }
+
   function getMinimapBounds() {
     const artW = Math.max(1, state.artboardWidth || 1920);
-    const artH = Math.max(1, state.artboardHeight || 1080);
+    const artH = getEffectiveArtboardHeight();
     const vw = Math.max(1, canvasScroll.clientWidth || 1000);
     const vh = Math.max(1, canvasScroll.clientHeight || 700);
     const z = Math.max(0.05, state.zoom || 1);
@@ -509,7 +524,7 @@
 
   function updateCanvasTransform() {
     const artW = state.artboardWidth || 1920;
-    const artH = state.artboardHeight || 1080;
+    const artH = getEffectiveArtboardHeight();
 
     previewFrame.style.width = `${artW}px`;
     previewFrame.style.height = `${artH}px`;
@@ -1797,13 +1812,21 @@
         }
       : null;
 
+    const pendingLibAction = state.lastLibraryAction;
+    state.lastLibraryAction = null;
+    const projectMetaPayload = {
+      artboard: { width: state.artboardWidth, height: state.artboardHeight },
+      ...(enrichedPayload && enrichedPayload.famousStyle !== undefined ? { famousStyle: enrichedPayload.famousStyle } : {}),
+      ...(pendingLibAction ? { libraryAction: pendingLibAction } : {})
+    };
+
     const synced = enrichedPayload
       ? codeSync.applyCanvasPayloadToProject({
           entry: state.entry,
           filesMap: state.projectFiles,
           originFilesMap: state.originFiles,
           payload: enrichedPayload,
-          projectMeta: { artboard: { width: state.artboardWidth, height: state.artboardHeight } }
+          projectMeta: projectMetaPayload
         })
       : { filesMap: { ...state.projectFiles }, modifiedFiles: Object.keys(state.codeEditedFiles || {}), hasChanges: false };
 
@@ -1821,7 +1844,7 @@
           payload: enrichedPayload,
           files: state.projectFiles,
           codeEditedFiles: state.codeEditedFiles,
-          projectMeta: { artboard: { width: state.artboardWidth, height: state.artboardHeight } }
+          projectMeta: projectMetaPayload
         })
       });
       const json = await resp.json();
@@ -1845,38 +1868,56 @@
       const origBtn = $('btnOriginal');
       origBtn.classList.remove('dirty');
       origBtn.classList.add('active');
-      $('autoSaveLabel').classList.remove('unsaved');
-      $('autoSaveLabel').textContent = 'Saved';
-      setTimeout(() => {
-        $('autoSaveLabel').textContent = 'Auto Save';
-      }, 1400);
+      syncLiveSyncButtonUI(false);
+      const lblTxt = $('autoSaveLabelText') || $('autoSaveLabel');
+      if (lblTxt) {
+        lblTxt.textContent = 'Saved ✓';
+        setTimeout(() => syncLiveSyncButtonUI(false), 1200);
+      }
     }
 
     return synced;
   }
 
+  function syncLiveSyncButtonUI(dirty = false) {
+    const btn = $('autoSaveLabel');
+    if (!btn) return;
+    const isOn = Boolean(state.preferences.autoSave);
+    btn.classList.toggle('active', isOn);
+    btn.classList.toggle('unsaved', Boolean(dirty) && !isOn);
+    btn.setAttribute('aria-pressed', isOn ? 'true' : 'false');
+    const lblTxt = $('autoSaveLabelText');
+    if (lblTxt) {
+      lblTxt.textContent = isOn ? 'Live Sync' : (dirty ? 'Staged · Click Save' : 'Manual Sync');
+    }
+    btn.title = isOn
+      ? 'Real-Time Live Sync ON — edits, Famous Styles & UI Templates update HTML/CSS & Coding Agent immediately (Click to pause)'
+      : 'Manual Staging Mode — experiment freely on canvas, then click Save (Ctrl+S) to apply to code & Coding Agent';
+  }
+
   function scheduleAutoCodeSync() {
+    if (!state.preferences.autoSave) return;
     clearTimeout(autoCodeSyncTimer);
     autoCodeSyncTimer = setTimeout(() => {
       syncCanvasToProjectFiles({ autoSyncOnly: true, markBaseline: false }).catch(() => {});
-    }, 180);
+    }, 150);
   }
 
   function scheduleAutoSaveIfEnabled() {
     if (!state.preferences.autoSave) return;
     clearTimeout(autoSaveTimer);
     autoSaveTimer = setTimeout(() => {
-      triggerDirectHtmlSave();
+      triggerDirectHtmlSave(false);
     }, 650);
   }
 
-  async function triggerDirectHtmlSave(showSavedToast = false) {
+  async function triggerDirectHtmlSave(showSavedToast = true) {
     const saveBtn = $('btnSave');
     saveBtn.disabled = true;
     try {
       await syncCanvasToProjectFiles({ autoSyncOnly: false, markBaseline: true });
       if (showSavedToast) {
-        showToast(`Saved project (${state.allFiles.length} file${state.allFiles.length === 1 ? '' : 's'})`);
+        showToast(`Saved & synced with Coding Agent (${state.allFiles.length} file${state.allFiles.length === 1 ? '' : 's'})`);
       }
     } catch (err) {
       console.error('[Vectora Canvas] Save error:', err);
@@ -1899,19 +1940,11 @@
     origBtn.classList.toggle('dirty', Boolean(dirty));
     origBtn.classList.toggle('active', !dirty);
 
-    const autoLbl = $('autoSaveLabel');
-    autoLbl.classList.toggle('unsaved', Boolean(dirty) && !state.preferences.autoSave);
-    autoLbl.title = state.preferences.autoSave
-      ? 'Auto Save enabled in Preferences'
-      : (dirty ? 'Canvas synced to code — click Save to commit baseline' : 'All changes match Saved / Original state');
+    syncLiveSyncButtonUI(Boolean(dirty));
 
-    // Automatically keep HTML, CSS, and JavaScript synced with canvas changes!
-    if (state.everEditedInSession) {
+    // When Live Sync is ON, immediately write HTML/CSS/JS & notify Coding Agent ("sathe sathe")!
+    if (state.everEditedInSession && state.preferences.autoSave) {
       scheduleAutoCodeSync();
-    }
-
-    if (dirty && state.preferences.autoSave) {
-      scheduleAutoSaveIfEnabled();
     }
   }
 
@@ -4990,25 +5023,37 @@
   async function publishFullPageInNewTab() {
     const codeSync = window.VectoraCodeSync;
     const cleanEntry = (state.entry || 'index.html').replace(/^\/+/, '');
-
-    if (state.hasServerBackend && !state.vfsMode) {
-      const pubUrl = `/__vc_publish/${cleanEntry}?vc_pub=${Date.now()}`;
-      if (!state.everEditedInSession) {
-        window.open(pubUrl, '_blank');
-        showToast(`Published ${cleanEntry} in new tab`);
-        return;
-      }
-      const newTab = window.open('about:blank', '_blank');
-      await syncCanvasToProjectFiles({ autoSyncOnly: true, markBaseline: false });
-      if (newTab) newTab.location.href = pubUrl;
-      else window.open(pubUrl, '_blank');
-      showToast(`Published ${cleanEntry} in new tab`);
-      return;
-    }
-
     const newTab = window.open('about:blank', '_blank');
+
     if (state.everEditedInSession) {
       await syncCanvasToProjectFiles({ autoSyncOnly: true, markBaseline: false });
+    }
+
+    if (state.hasServerBackend && !state.vfsMode) {
+      try {
+        const resp = await fetch('/__vc_api/temp-preview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ entry: cleanEntry, ttlMinutes: 30 })
+        });
+        const json = await resp.json();
+        const targetUrl = (json && json.ok && json.previewPath)
+          ? json.previewPath
+          : `/__vc_publish/${cleanEntry}?vc_pub=${Date.now()}`;
+        if (json && json.token) {
+          state.activeTempPreviewToken = json.token;
+          if ($('tempPreviewDot')) $('tempPreviewDot').hidden = false;
+        }
+        if (newTab) newTab.location.href = targetUrl;
+        else window.open(targetUrl, '_blank');
+        showToast(`Opened Temporary Live Preview (${cleanEntry} · auto-reloads on edits)`);
+        return;
+      } catch (_) {}
+    }
+
+    if (state.lastTempBlobUrl) {
+      try { URL.revokeObjectURL(state.lastTempBlobUrl); } catch (_) {}
+      state.lastTempBlobUrl = '';
     }
     const compiledFullPage = codeSync
       ? codeSync.compileStandaloneHtml({
@@ -5023,12 +5068,14 @@
       : (state.projectFiles[state.entry] || '<!doctype html><html><body></body></html>');
     const blob = new Blob([compiledFullPage], { type: 'text/html;charset=utf-8' });
     const blobUrl = URL.createObjectURL(blob);
+    state.lastTempBlobUrl = blobUrl;
+    if ($('tempPreviewDot')) $('tempPreviewDot').hidden = false;
     if (newTab) {
       newTab.location.href = blobUrl;
     } else {
       window.open(blobUrl, '_blank');
     }
-    showToast(`Published ${cleanEntry} in new tab`);
+    showToast(`Opened Temporary Live Preview (${cleanEntry})`);
   }
 
   async function triggerProjectExportDownload() {
@@ -5583,8 +5630,24 @@
 
     $('btnUndo').addEventListener('click', () => postToBridge('undo'));
     $('btnRedo').addEventListener('click', () => postToBridge('redo'));
-    $('btnSave').addEventListener('click', () => triggerDirectHtmlSave());
+    $('btnSave').addEventListener('click', () => triggerDirectHtmlSave(true));
     $('btnOriginal').addEventListener('click', () => postToBridge('restore_original'));
+    if ($('autoSaveLabel')) {
+      $('autoSaveLabel').addEventListener('click', () => {
+        state.preferences.autoSave = !state.preferences.autoSave;
+        if ($('prefAutoSave')) $('prefAutoSave').checked = state.preferences.autoSave;
+        syncLiveSyncButtonUI(false);
+        persistPreferences();
+        if (state.preferences.autoSave && state.everEditedInSession) {
+          scheduleAutoCodeSync();
+        }
+        showToast(
+          state.preferences.autoSave
+            ? 'Live Sync ON — edits update code & Coding Agent in real time'
+            : 'Manual Staging ON — click Save (Ctrl+S) when ready to apply'
+        );
+      });
+    }
 
     // Global Primary / Secondary Palette (independent live input preview + single-step Undo commit!)
     const pushPrimaryPalette = (commit) => {
@@ -5637,7 +5700,11 @@
     });
     $('prefAutoSave').addEventListener('change', (ev) => {
       state.preferences.autoSave = ev.target.checked;
+      syncLiveSyncButtonUI(false);
       persistPreferences();
+      if (state.preferences.autoSave && state.everEditedInSession) {
+        scheduleAutoCodeSync();
+      }
     });
     $('prefBtnScaleInPlace').addEventListener('click', () => setMultiScaleMode('in-place'));
     $('prefBtnScaleNormal').addEventListener('click', () => setMultiScaleMode('normal'));
@@ -6447,6 +6514,13 @@
         syncTopCornerControlBar(msg);
         break;
       }
+      case 'vc_page_metrics': {
+        if (msg.artboardRect) {
+          state.artboardMetrics = msg.artboardRect;
+          updateCanvasTransform();
+        }
+        break;
+      }
       case 'vc_note_marked': {
         openNotePopup({
           selector: msg.selector,
@@ -6582,11 +6656,43 @@
       es.addEventListener('agent_command', (ev) => {
         try {
           const cmd = JSON.parse(ev.data);
+          if (cmd.action === 'apply_famous_style' && cmd.styleId) {
+            applyFamousStyleInStudio(cmd.styleId === 'reset' ? '' : cmd.styleId, { fromAgent: true });
+            return;
+          }
           if (cmd.mode) setWorkspaceMode(cmd.mode);
           if (cmd.entry && cmd.entry !== state.entry) {
             loadEntryIntoIframe(cmd.entry);
           }
           postToBridge('agent_live_exec', { payload: cmd });
+        } catch (_) {}
+      });
+      es.addEventListener('disk_files_changed', (ev) => {
+        try {
+          const data = JSON.parse(ev.data);
+          if (data.contents && typeof data.contents === 'object') {
+            state.projectFiles = data.contents;
+            if (data.origins) state.originFiles = data.origins;
+            rebuildFileListsFromMap(state.projectFiles);
+            renderCodeEditorUI(false);
+          }
+          const changed = Array.isArray(data.changedFiles) ? data.changedFiles : [];
+          const onlyCssChanged = changed.length > 0 && changed.every((f) => /\.css$/i.test(f));
+          if (onlyCssChanged) {
+            postToBridge('hot_reload_stylesheets', { files: changed });
+            showToast(`Live CSS updated (${changed.join(', ')})`);
+          } else if (changed.length > 0) {
+            const keepZoom = state.zoom;
+            const keepPanX = state.panX;
+            const keepPanY = state.panY;
+            state.hasManualViewport = true;
+            loadEntryIntoIframe(state.entry);
+            state.zoom = keepZoom;
+            state.panX = keepPanX;
+            state.panY = keepPanY;
+            updateCanvasTransform();
+            showToast(`Live synced from Coding Agent (${changed.join(', ')})`);
+          }
         } catch (_) {}
       });
     } catch (_) {}
@@ -6728,12 +6834,357 @@
     }
   }
 
+  // =========================================================================
+  // DESIGN STUDIO LIBRARY (FAMOUS STYLES, FAMOUS UI ELEMENTS & PREMADE TEMPLATES)
+  // =========================================================================
+  function toggleLibraryDrawer(forceState) {
+    const drawer = $('libraryDrawer');
+    if (!drawer) return;
+    const nextOpen = typeof forceState === 'boolean' ? forceState : drawer.hidden;
+    drawer.hidden = !nextOpen;
+    if ($('btnOpenLibrary')) $('btnOpenLibrary').classList.toggle('active', nextOpen);
+    if ($('btnDockLibrary')) $('btnDockLibrary').classList.toggle('active', nextOpen);
+    if (nextOpen) renderLibraryDrawer();
+  }
+
+  function applyFamousStyleInStudio(styleId, opts = {}) {
+    const lib = window.VectoraDesignLibrary;
+    if (!lib) return;
+    if (!styleId || styleId === 'reset') {
+      state.activeFamousStyleId = '';
+      if ($('btnResetFamousStyle')) $('btnResetFamousStyle').hidden = true;
+      $('ddPresetLabel').textContent = 'Theme: Default';
+      postToBridge('apply_famous_style', {
+        styleId: '',
+        cssText: '',
+        googleFonts: [],
+        styleMeta: null
+      });
+      state.everEditedInSession = true;
+      if (state.preferences.autoSave && !opts.fromAgent) scheduleAutoCodeSync();
+      renderLibraryDrawer();
+      showToast('Restored original project style');
+      return;
+    }
+
+    const s = lib.getFamousStyleById(styleId);
+    if (!s) return;
+    state.activeFamousStyleId = s.id;
+    const cssText = lib.compileStyleCss(s.id);
+    const brief = lib.buildAgentStyleBrief(s.id);
+    if (s.tokens['--primary']) $('inpPrimaryColor').value = s.tokens['--primary'];
+    if (s.tokens['--secondary'] && /^#[0-9a-f]{6}$/i.test(s.tokens['--secondary'])) {
+      $('inpSecondaryColor').value = s.tokens['--secondary'];
+    }
+    $('ddPresetLabel').textContent = `Style: ${s.name.split(' ')[0]}`;
+    if ($('btnResetFamousStyle')) $('btnResetFamousStyle').hidden = false;
+
+    postToBridge('apply_famous_style', {
+      styleId: s.id,
+      cssText,
+      googleFonts: s.googleFonts || [],
+      styleMeta: brief,
+      primaryColor: s.tokens['--primary'] || '',
+      secondaryColor: s.tokens['--secondary'] || ''
+    });
+    state.everEditedInSession = true;
+    if (state.preferences.autoSave && !opts.fromAgent) {
+      scheduleAutoCodeSync();
+    }
+    renderLibraryDrawer();
+    showToast(
+      state.preferences.autoSave
+        ? `Applied "${s.name}" · Live-synced to code & Coding Agent`
+        : `Applied "${s.name}" · Click Save to sync to Coding Agent`
+    );
+  }
+
+  function insertFamousElementInStudio(elId) {
+    const lib = window.VectoraDesignLibrary;
+    if (!lib) return;
+    const item = lib.getFamousElementById(elId);
+    if (!item) return;
+    const built = item.build();
+    const replaceSelected = Boolean($('chkLibReplaceSelected')?.checked) && state.selection.count === 1;
+    state.lastLibraryAction = {
+      kind: replaceSelected ? 'library_swap_element' : 'library_insert_element',
+      itemId: item.id,
+      summary: `${replaceSelected ? 'Replaced selected element with' : 'Inserted'} Famous UI Element "${item.name}" (${item.inspiration})`
+    };
+    postToBridge('insert_library_element', {
+      itemId: item.id,
+      itemName: item.name,
+      html: built.html,
+      libraryBaseCss: lib.SHARED_COMPONENT_CSS,
+      replaceSelected
+    });
+    state.everEditedInSession = true;
+    if (state.preferences.autoSave) scheduleAutoCodeSync();
+    showToast(`${replaceSelected ? 'Swapped with' : 'Inserted'} ${item.name}`);
+  }
+
+  async function applyPremadeTemplateInStudio(tplId, asNewSession = false) {
+    const lib = window.VectoraDesignLibrary;
+    if (!lib) return;
+    const tpl = lib.getPremadeTemplateById(tplId);
+    if (!tpl) return;
+    const bodyHtml = tpl.buildBodyHtml();
+    const styleObj = tpl.defaultStyle ? lib.getFamousStyleById(tpl.defaultStyle) : null;
+    const famousStyleCss = styleObj ? lib.compileStyleCss(styleObj.id) : '';
+    const styleMeta = styleObj ? lib.buildAgentStyleBrief(styleObj.id) : null;
+
+    if (asNewSession && state.hasServerBackend && !state.vfsMode) {
+      const slug = `${tpl.id.replace(/^tpl-/, '')}.html`;
+      try {
+        const res = await fetch('/__vc_api/create-session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: slug })
+        });
+        const json = await res.json();
+        if (json && json.ok && json.entry) {
+          state.projectFiles = json.contents || state.projectFiles;
+          state.originFiles = json.origins || state.originFiles;
+          rebuildFileListsFromMap(state.projectFiles);
+          loadEntryIntoIframe(json.entry);
+          setTimeout(() => {
+            state.activeFamousStyleId = styleObj ? styleObj.id : '';
+            state.lastLibraryAction = {
+              kind: 'template_applied_new_page',
+              itemId: tpl.id,
+              summary: `Created new page ${json.entry} from Premade Template "${tpl.name}"`
+            };
+            postToBridge('apply_premade_template', {
+              templateId: tpl.id,
+              templateName: tpl.name,
+              bodyHtml,
+              libraryBaseCss: lib.SHARED_COMPONENT_CSS,
+              famousStyleCss,
+              styleMeta,
+              googleFonts: styleObj ? styleObj.googleFonts : []
+            });
+          }, 420);
+          showToast(`Created ${json.entry} with "${tpl.name}"`);
+          return;
+        }
+      } catch (_) {}
+    }
+
+    if (styleObj) {
+      state.activeFamousStyleId = styleObj.id;
+      if ($('btnResetFamousStyle')) $('btnResetFamousStyle').hidden = false;
+      $('ddPresetLabel').textContent = `Style: ${styleObj.name.split(' ')[0]}`;
+    }
+    state.lastLibraryAction = {
+      kind: 'template_transformed_page',
+      itemId: tpl.id,
+      summary: `Transformed ${state.entry} using Premade UI Template "${tpl.name}"`
+    };
+    postToBridge('apply_premade_template', {
+      templateId: tpl.id,
+      templateName: tpl.name,
+      bodyHtml,
+      libraryBaseCss: lib.SHARED_COMPONENT_CSS,
+      famousStyleCss,
+      styleMeta,
+      googleFonts: styleObj ? styleObj.googleFonts : []
+    });
+    state.everEditedInSession = true;
+    if (state.preferences.autoSave) scheduleAutoCodeSync();
+    renderLibraryDrawer();
+    showToast(`Applied Template "${tpl.name}" (Ctrl+Z to Undo)`);
+  }
+
+  function renderLibraryDrawer() {
+    const lib = window.VectoraDesignLibrary;
+    const listEl = $('libraryItemsList');
+    const catRow = $('libraryCatRow');
+    const hintEl = $('librarySubHint');
+    const swapLbl = $('lblLibSwapSelected');
+    if (!lib || !listEl) return;
+
+    document.querySelectorAll('.ld-tab[data-ltab]').forEach((b) => {
+      b.classList.toggle('active', b.getAttribute('data-ltab') === state.libraryTab);
+    });
+    if ($('btnResetFamousStyle')) {
+      $('btnResetFamousStyle').hidden = !state.activeFamousStyleId;
+    }
+
+    const q = (state.librarySearch || '').trim().toLowerCase();
+    listEl.innerHTML = '';
+
+    if (state.libraryTab === 'styles') {
+      if (catRow) catRow.hidden = true;
+      if (swapLbl) swapLbl.hidden = true;
+      if (hintEl) hintEl.textContent = "1-click morphs the Coding Agent's current UI into an iconic design system.";
+
+      for (const s of lib.FAMOUS_STYLES) {
+        if (q && !(`${s.name} ${s.inspiration} ${s.summary} ${s.badge}`).toLowerCase().includes(q)) continue;
+        const card = document.createElement('div');
+        const isAct = state.activeFamousStyleId === s.id;
+        card.className = 'ld-card' + (isAct ? ' active-style' : '');
+        const swatchesHtml = (s.swatches || [])
+          .map((hex) => `<span class="ld-sw" style="background:${hex}" title="${hex}"></span>`)
+          .join('');
+        card.innerHTML = `
+          <div class="ld-card-top">
+            <span class="ld-card-title">${s.name}</span>
+            <span class="ld-card-badge">${s.badge}</span>
+          </div>
+          <div class="ld-card-desc">${s.summary}</div>
+          <div class="ld-card-foot">
+            <div class="ld-swatches">${swatchesHtml}</div>
+            <button type="button" class="mini-btn ${isAct ? '' : 'accent'}">${isAct ? 'Active ✓' : 'Apply Style'}</button>
+          </div>
+        `;
+        card.querySelector('button').addEventListener('click', () => applyFamousStyleInStudio(s.id));
+        listEl.appendChild(card);
+      }
+      return;
+    }
+
+    if (state.libraryTab === 'elements') {
+      if (swapLbl) swapLbl.hidden = false;
+      if (hintEl) hintEl.textContent = '100% Figma/Illustrator editable blocks — every text, icon & frame is selectable.';
+      const cats = ['All', ...Array.from(new Set(lib.FAMOUS_ELEMENTS.map((e) => e.category)))];
+      if (catRow) {
+        catRow.hidden = false;
+        catRow.innerHTML = '';
+        for (const c of cats) {
+          const pill = document.createElement('button');
+          pill.type = 'button';
+          pill.className = 'ld-cat-pill' + (state.libraryCategory === c ? ' active' : '');
+          pill.textContent = c;
+          pill.addEventListener('click', () => {
+            state.libraryCategory = c;
+            renderLibraryDrawer();
+          });
+          catRow.appendChild(pill);
+        }
+      }
+
+      for (const elItem of lib.FAMOUS_ELEMENTS) {
+        if (state.libraryCategory !== 'All' && elItem.category !== state.libraryCategory) continue;
+        if (q && !(`${elItem.name} ${elItem.inspiration} ${elItem.summary} ${elItem.category}`).toLowerCase().includes(q)) continue;
+        const card = document.createElement('div');
+        card.className = 'ld-card';
+        card.innerHTML = `
+          <div class="ld-card-top">
+            <span class="ld-card-title">${elItem.name}</span>
+            <span class="ld-card-badge">${elItem.category}</span>
+          </div>
+          <div class="ld-card-desc">${elItem.summary}</div>
+          <div class="ld-card-foot">
+            <span class="ld-insp-tag">${elItem.inspiration}</span>
+            <button type="button" class="mini-btn accent">+ Insert</button>
+          </div>
+        `;
+        card.querySelector('button').addEventListener('click', () => insertFamousElementInStudio(elItem.id));
+        listEl.appendChild(card);
+      }
+      return;
+    }
+
+    if (state.libraryTab === 'templates') {
+      if (catRow) catRow.hidden = true;
+      if (swapLbl) swapLbl.hidden = true;
+      if (hintEl) hintEl.textContent = 'Full multi-section layouts — transform the current page or open as a new page.';
+      for (const tpl of lib.PREMADE_TEMPLATES) {
+        if (q && !(`${tpl.name} ${tpl.summary} ${tpl.badge}`).toLowerCase().includes(q)) continue;
+        const card = document.createElement('div');
+        card.className = 'ld-card';
+        card.innerHTML = `
+          <div class="ld-card-top">
+            <span class="ld-card-title">${tpl.name}</span>
+            <span class="ld-card-badge">${tpl.badge}</span>
+          </div>
+          <div class="ld-card-desc">${tpl.summary}</div>
+          <div class="ld-card-foot">
+            <button type="button" class="mini-btn" data-act="new-page">+ New Page</button>
+            <button type="button" class="mini-btn accent" data-act="apply-cur">Transform Page</button>
+          </div>
+        `;
+        card.querySelector('[data-act="apply-cur"]').addEventListener('click', () => applyPremadeTemplateInStudio(tpl.id, false));
+        card.querySelector('[data-act="new-page"]').addEventListener('click', () => applyPremadeTemplateInStudio(tpl.id, true));
+        listEl.appendChild(card);
+      }
+    }
+  }
+
+  function wireDesignLibraryAndQuickFlow() {
+    if ($('btnOpenLibrary')) $('btnOpenLibrary').addEventListener('click', () => toggleLibraryDrawer());
+    if ($('btnDockLibrary')) $('btnDockLibrary').addEventListener('click', () => toggleLibraryDrawer());
+    if ($('btnCloseLibraryDrawer')) $('btnCloseLibraryDrawer').addEventListener('click', () => toggleLibraryDrawer(false));
+    if ($('btnResetFamousStyle')) $('btnResetFamousStyle').addEventListener('click', () => applyFamousStyleInStudio('reset'));
+
+    document.querySelectorAll('.ld-tab[data-ltab]').forEach((b) => {
+      b.addEventListener('click', () => {
+        state.libraryTab = b.getAttribute('data-ltab') || 'styles';
+        renderLibraryDrawer();
+      });
+    });
+    if ($('inpLibrarySearch')) {
+      $('inpLibrarySearch').addEventListener('input', (ev) => {
+        state.librarySearch = ev.target.value || '';
+        renderLibraryDrawer();
+      });
+    }
+
+    // Figma Quick Hug / Fill / Auto-Layout Row & Col controls
+    document.querySelectorAll('#figmaQuickFlowBar [data-qflow]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const act = btn.getAttribute('data-qflow');
+        let props = null;
+        if (act === 'hug-w') props = { width: 'fit-content', minWidth: '0px', maxWidth: 'none' };
+        else if (act === 'fill-w') props = { width: '100%', minWidth: '0px', maxWidth: 'none' };
+        else if (act === 'hug-h') props = { height: 'auto', minHeight: '0px', maxHeight: 'none' };
+        else if (act === 'flex-row') props = { display: 'flex', flexDirection: 'row', alignItems: 'center', gap: '12px' };
+        else if (act === 'flex-col') props = { display: 'flex', flexDirection: 'column', gap: '12px' };
+        if (props) {
+          postToBridge('patch_style', { props, previewOnly: false, commitScrub: true });
+        }
+      });
+    });
+
+    // Global shortcut 'L' toggles Design Library Drawer when not typing in inputs
+    window.addEventListener('keydown', (ev) => {
+      if (ev.key && ev.key.toLowerCase() === 'l' && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+        const tag = document.activeElement?.tagName;
+        if (!['INPUT', 'TEXTAREA', 'SELECT'].includes(tag) && !document.activeElement?.isContentEditable) {
+          toggleLibraryDrawer();
+        }
+      }
+    });
+
+    // Enrich Topbar Theme Dropdown (#ddPresetMenu) with Famous Styles too!
+    const lib = window.VectoraDesignLibrary;
+    const presetMenu = $('ddPresetMenu');
+    if (lib && presetMenu) {
+      const sep = document.createElement('div');
+      sep.className = 'dd-sep';
+      presetMenu.appendChild(sep);
+      for (const s of lib.FAMOUS_STYLES) {
+        const opt = document.createElement('button');
+        opt.type = 'button';
+        opt.className = 'dd-opt';
+        opt.innerHTML = `<span>✦ ${s.name}</span>`;
+        opt.addEventListener('click', () => {
+          presetMenu.hidden = true;
+          applyFamousStyleInStudio(s.id);
+        });
+        presetMenu.appendChild(opt);
+      }
+    }
+  }
+
   // Initialize everything
   state.gpuInfo = detectHardwareAcceleration();
   syncAccelerationEngineUI();
   syncBypassButtonUI(false);
   syncHostCanvasCursor();
   wireUiControls();
+  wireDesignLibraryAndQuickFlow();
+  syncLiveSyncButtonUI(false);
   wireRulersAndUserGuides();
   wireReferenceImagesAndArrowCapture();
   wireMinimapAndOuterCanvasPanZoom();

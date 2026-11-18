@@ -1,15 +1,11 @@
 {
   "command": "node",
   "args": [
-    "H:/AntyGravety/Vectora Canvas/scripts/server.mjs",
-    "--target",
-    "h:/AntyGravety/github",
-    "--entry",
-    "index.html"
+    "H:/AntyGravety/Vectora Canvas/scripts/server.mjs"
   ],
   "restart_policy": "always",
   "display_name": "Vectora Canvas",
-  "description": "Direct-HTML Visual Editor & Live Preview Workspace (Grey Stone + Orange)",
+  "description": "Interactive Figma & Illustrator Visual HTML/CSS/JS Studio with Real-Time Coding Agent Sync",
   "has_web_ui": true,
   "ui_config": {
     "display_name": "Vectora Canvas",

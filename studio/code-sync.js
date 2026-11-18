@@ -319,6 +319,27 @@
       .replace(VECTORA_SYNC_STYLE_RE, '\n')
       .replace(VECTORA_GFONT_LINK_RE, '\n');
 
+    if (payload.replaceBodyHtml && typeof payload.replaceBodyHtml === 'string') {
+      const bodyMatch = /(<body\b[^>]*>)([\s\S]*?)(<\/body\s*>)/i.exec(htmlContent);
+      if (bodyMatch) {
+        const trailingScripts = [];
+        const scriptRe = /<script\b[^>]*\bsrc\s*=\s*["'][^"']+["'][^>]*>\s*<\/script>/gi;
+        let sm;
+        while ((sm = scriptRe.exec(bodyMatch[2])) !== null) {
+          if (!/data-vc-bridge/i.test(sm[0])) trailingScripts.push('  ' + sm[0].trim());
+        }
+        const preservedScripts = trailingScripts.length ? '\n' + trailingScripts.join('\n') + '\n' : '\n';
+        htmlContent =
+          htmlContent.slice(0, bodyMatch.index) +
+          bodyMatch[1] +
+          '\n' +
+          payload.replaceBodyHtml.trim() +
+          preservedScripts +
+          bodyMatch[3] +
+          htmlContent.slice(bodyMatch.index + bodyMatch[0].length);
+      }
+    }
+
     const deletedTargets = Array.isArray(payload.deletedTargets) ? payload.deletedTargets : [];
     const fallbackDynamicRules = [];
     const syncedCssRules = [];
@@ -468,6 +489,12 @@
     }
 
     const extraCssBlocks = [];
+    if (payload.libraryBaseCss && String(payload.libraryBaseCss).trim()) {
+      extraCssBlocks.push(String(payload.libraryBaseCss).trim());
+    }
+    if (payload.famousStyleCss && String(payload.famousStyleCss).trim()) {
+      extraCssBlocks.push(String(payload.famousStyleCss).trim());
+    }
     if (payload.themeCss && String(payload.themeCss).trim()) {
       extraCssBlocks.push(String(payload.themeCss).trim());
     }
@@ -493,12 +520,15 @@
       extraCssBlocks,
       syncedCssRules,
       hasChanges: Boolean(
+        payload.replaceBodyHtml ||
         deletedTargets.length ||
         textPatches.length ||
         stylePatches.length ||
         attrPatches.length ||
         insertedNodes.length ||
         googleFonts.length ||
+        (payload.libraryBaseCss && String(payload.libraryBaseCss).trim()) ||
+        (payload.famousStyleCss && String(payload.famousStyleCss).trim()) ||
         (payload.themeCss && String(payload.themeCss).trim())
       ),
       counts: {
@@ -585,6 +615,8 @@
             secondary: payload.secondaryColor || '',
             preset: payload.preset || 'original'
           },
+          famousStyle: payload.famousStyle || null,
+          templateId: payload.templateId || '',
           elements: elementSyncMap,
           counts: patched.counts
         };
@@ -919,53 +951,53 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <header class="site-header" id="headerSession">
-    <div class="brand-row">
-      <span class="pulse-dot" id="livePulseDot"></span>
-      <strong class="brand-title" id="brandTitle">${safeTitle}</strong>
+  <header class="site-header" id="headerSession" data-name="Site Header" data-vc-section="Site Header">
+    <div class="brand-row" id="brandGroup" data-name="Brand Group">
+      <span class="pulse-dot" id="livePulseDot" data-name="Live Status Dot"></span>
+      <strong class="brand-title" id="brandTitle" data-name="Brand Title">${safeTitle}</strong>
     </div>
-    <nav class="nav-links" id="mainNav">
-      <a href="index.html" class="nav-link active">Overview</a>
-      <a href="about.html" class="nav-link">Specs &amp; Sessions</a>
-      <button type="button" class="btn-secondary" id="btnSecondaryAction" data-vc-link="about.html">Preview Specs</button>
-      <button type="button" class="btn-primary" id="btnPrimaryCta" data-vc-link="#featuresSession">Launch Workspace</button>
+    <nav class="nav-links" id="mainNav" data-name="Navigation Bar" data-vc-section="Navigation">
+      <a href="index.html" class="nav-link active" id="navOverview"><span class="vc-pt">Overview</span></a>
+      <a href="about.html" class="nav-link" id="navSpecs"><span class="vc-pt">Specs &amp; Sessions</span></a>
+      <button type="button" class="btn-secondary" id="btnSecondaryAction" data-vc-link="about.html" data-name="Preview Specs Button"><span class="vc-pt">Preview Specs</span></button>
+      <button type="button" class="btn-primary" id="btnPrimaryCta" data-vc-link="#featuresSession" data-name="Launch Workspace CTA"><span class="vc-pt">Launch Workspace</span></button>
     </nav>
   </header>
 
-  <main class="page-shell">
-    <section class="hero-section" id="heroSession">
-      <div class="hero-copy">
-        <span class="eyebrow" id="heroEyebrow">DIRECT MULTI-FILE HTML · CSS · JS</span>
-        <h1 id="heroHeading">Design visually on the artboard. Keep every file in sync.</h1>
-        <p class="subtitle" id="heroSubtitle">Select, group, align, insert Flow Divs, or switch to Live mode to test real scrolling, animations, and 3D WebGL scenes.</p>
-        <div class="cta-row" id="heroActions">
-          <button type="button" class="btn-primary" id="btnHeroStart">Start Building</button>
-          <button type="button" class="btn-secondary" id="btnCycleScene">Cycle 3D Camera (<span id="clickCounter">0</span>)</button>
+  <main class="page-shell" id="pageShell" data-name="Main Page Shell">
+    <section class="hero-section" id="heroSession" data-name="Hero Section" data-vc-section="Hero Section">
+      <div class="hero-copy" id="heroCopyGroup" data-name="Hero Copy Group" data-vc-section="Hero Copy">
+        <span class="eyebrow" id="heroEyebrow" data-name="Hero Eyebrow">DIRECT MULTI-FILE HTML · CSS · JS</span>
+        <h1 id="heroHeading" data-name="Hero Headline">Design visually on the artboard. Keep every file in sync.</h1>
+        <p class="subtitle" id="heroSubtitle" data-name="Hero Subtitle">Select, group, align, insert Flow Divs, apply Famous Styles, or switch to Live mode to test real scrolling, animations, and 3D WebGL scenes.</p>
+        <div class="cta-row" id="heroActions" data-name="Hero Actions Row" data-vc-section="Hero Actions">
+          <button type="button" class="btn-primary" id="btnHeroStart" data-name="Start Building CTA"><span class="vc-pt">Start Building</span></button>
+          <button type="button" class="btn-secondary" id="btnCycleScene" data-name="Cycle 3D Camera Button"><span class="vc-pt">Cycle 3D Camera</span><span id="clickCounter" class="vc-pt" style="margin-left:6px;">0</span></button>
         </div>
       </div>
-      <div class="viewport-card card" id="viewportCard">
-        <div class="vp-bar">
-          <span id="vpLabel">Interactive 3D WebGL Stage</span>
-          <span class="vp-fps" id="vpAngleBadge">Yaw 0°</span>
+      <div class="viewport-card card" id="viewportCard" data-name="3D Viewport Card" data-vc-section="3D Stage">
+        <div class="vp-bar" id="vpHeaderBar" data-name="Viewport Header">
+          <span id="vpLabel" class="vc-pt">Interactive 3D WebGL Stage</span>
+          <span class="vp-fps vc-pt" id="vpAngleBadge">Yaw 0°</span>
         </div>
-        <canvas id="heroGlCanvas" width="560" height="320"></canvas>
+        <canvas id="heroGlCanvas" width="560" height="320" data-name="3D WebGL Canvas"></canvas>
       </div>
     </section>
 
-    <section class="features-section" id="featuresSession">
-      <h2 class="subtitle" id="featuresTitle">Core Capabilities</h2>
-      <div class="feature-grid" id="featureGrid">
-        <article class="card feature-card" id="featCard1">
-          <h3>Whole-Folder Sync</h3>
-          <p>Edits automatically update HTML structure, CSS rules, and JS design state together.</p>
+    <section class="features-section" id="featuresSession" data-name="Features Section" data-vc-section="Core Capabilities">
+      <h2 class="subtitle" id="featuresTitle" data-name="Features Heading" style="width:fit-content;">Core Capabilities</h2>
+      <div class="feature-grid" id="featureGrid" data-name="Features Card Grid" data-vc-section="Feature Grid">
+        <article class="card feature-card" id="featCard1" data-name="Whole-Folder Sync Card" data-vc-section="Feature Card 1">
+          <h3 id="featTitle1" style="width:fit-content;">Whole-Folder Live Sync</h3>
+          <p id="featBody1">Edits immediately update HTML structure, CSS tokens, and Coding Agent state together.</p>
         </article>
-        <article class="card feature-card" id="featCard2">
-          <h3>Illustrator Precision</h3>
-          <p>Shift-click, Ctrl-click Select Behind, marquee lower-layer select, and Flow Div gap closing.</p>
+        <article class="card feature-card" id="featCard2" data-name="Illustrator Precision Card" data-vc-section="Feature Card 2">
+          <h3 id="featTitle2" style="width:fit-content;">Figma &amp; Illustrator Precision</h3>
+          <p id="featBody2">Shift-click, Isolation Mode, vector SVG paint, magnetic rulers, and Famous Styles.</p>
         </article>
-        <article class="card feature-card" id="featCard3">
-          <h3>Snapshot Edit vs Live</h3>
-          <p>Freeze scroll, CSS animations, and 3D WebGL in Edit mode; run everything in Live mode.</p>
+        <article class="card feature-card" id="featCard3" data-name="Snapshot vs Live Card" data-vc-section="Feature Card 3">
+          <h3 id="featTitle3" style="width:fit-content;">Snapshot Edit &amp; Temp Preview</h3>
+          <p id="featBody3">Freeze animations in Edit mode, or launch a Temporary Live Verification tab anytime.</p>
         </article>
       </div>
     </section>
@@ -1428,6 +1460,8 @@ ${jsTags}
   return {
     normalizeRelPath,
     resolveRelativeAssetPath,
+    mergeStyleIntoOpenTag,
+    mergeAttrsIntoOpenTag,
     patchSingleHtmlString,
     applyCanvasPayloadToProject,
     compileStandaloneHtml,

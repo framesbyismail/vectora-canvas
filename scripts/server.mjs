@@ -17,12 +17,14 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const require = createRequire(import.meta.url);
 const codeSync = require('../studio/code-sync.js');
+const designLib = require('../studio/design-library.js');
 const SKILL_ROOT = path.resolve(__dirname, '..');
 const STUDIO_DIR = path.join(SKILL_ROOT, 'studio');
 const MEMORY_DIR = path.join(SKILL_ROOT, 'memory');
 const PROJECTS_ROOT = path.join(MEMORY_DIR, 'projects');
 const MEMORY_FILE = path.join(MEMORY_DIR, 'skill-memory.json');
 const NOTES_FILE = path.join(MEMORY_DIR, 'agent-notes.json');
+const LIVE_SYNC_FILE = path.join(MEMORY_DIR, 'live-agent-sync.json');
 const BACKUP_ROOT = path.join(MEMORY_DIR, 'backups');
 const SANDBOX_ROOT = path.join(MEMORY_DIR, 'sandboxes');
 
@@ -90,7 +92,7 @@ function saveDataUrlToFile(dataUrl, destPath) {
 
 function defaultPreferences() {
   return {
-    autoSave: false, // Manual Save by default per Vectora Canvas spec ("saves only when clicked, not automatically")
+    autoSave: true, // Real-Time Live Sync ON by default ("aikhane ja kaj korso sathe sate agent oita chnage korbe")
     smartGuides: true,
     autoGroupButtons: true,
     scaleStrokesAndEffects: true,
@@ -426,11 +428,16 @@ function copyDirFiltered(src, dest) {
 
 if (!args.target) {
   const savedMem = loadMemory();
+  const isInternalConfigDir = (p) => /\.gemini[\\/]config/i.test(String(p || ''));
   const recent = (savedMem.recentWorkspaces || []).find((w) => {
     const candidate = w.originalSourceDir || w.target;
-    return candidate && fs.existsSync(candidate);
+    return candidate && !isInternalConfigDir(candidate) && fs.existsSync(candidate);
   });
-  args.target = recent ? (recent.originalSourceDir || recent.target) : process.cwd();
+  const cwdCand = process.cwd();
+  args.target = recent
+    ? (recent.originalSourceDir || recent.target)
+    : (!isInternalConfigDir(cwdCand) ? cwdCand : PROJECTS_ROOT);
+  fs.mkdirSync(PROJECTS_ROOT, { recursive: true });
   if (recent && recent.entry && !process.argv.some((a) => a.startsWith('--entry') || a === '-e')) {
     args.entry = recent.entry;
   }
@@ -461,6 +468,18 @@ let savedBaselineDir = path.join(BACKUP_ROOT, `${workspaceId}_saved`);
 
 function normalizeFolderIdentity(p) {
   return String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+}
+
+function isSubPath(childPath, rootPath) {
+  if (!childPath || !rootPath) return false;
+  const c = path.resolve(childPath);
+  const r = path.resolve(rootPath);
+  if (process.platform === 'win32') {
+    const cl = c.toLowerCase();
+    const rl = r.toLowerCase();
+    return cl === rl || cl.startsWith(rl.endsWith('\\') ? rl : rl + '\\');
+  }
+  return c === r || c.startsWith(r.endsWith('/') ? r : r + '/');
 }
 
 function recordWorkspaceBoot() {
@@ -605,6 +624,159 @@ function readWholeFolderTextMap(rootDir, refreshOrigins = false) {
 }
 
 const lastVectoraWriteMtimeByFile = new Map();
+const lastVectoraWriteSizeByFile = new Map();
+function markVectoraOwnWrite(fullPath) {
+  try {
+    const st = fs.statSync(fullPath);
+    lastVectoraWriteMtimeByFile.set(fullPath, st.mtimeMs);
+    lastVectoraWriteSizeByFile.set(fullPath, st.size);
+  } catch (_) {}
+}
+
+// ============================================================================
+// REAL-TIME TWO-WAY FILE & CODING AGENT SYNC + EPHEMERAL TEMP PREVIEW ENGINE
+// ============================================================================
+const tempPreviewsByToken = new Map();
+let activeFolderWatcher = null;
+let diskWatchDebounceTimer = null;
+const pendingExternalChangedPaths = new Set();
+
+function loadLiveSyncStore() {
+  try {
+    if (fs.existsSync(LIVE_SYNC_FILE)) {
+      return JSON.parse(fs.readFileSync(LIVE_SYNC_FILE, 'utf8'));
+    }
+  } catch (_) {}
+  return {
+    skillName: 'vectora-canvas',
+    workspaceId,
+    targetProject: originalSourceDir || resolvedTargetDir || args.target || '',
+    entry: args.entry || 'index.html',
+    activeFamousStyle: null,
+    lastUpdatedAt: null,
+    pendingEvents: []
+  };
+}
+
+function recordLiveAgentSyncEvent(kind, summary, extra = {}) {
+  try {
+    const store = loadLiveSyncStore();
+    store.workspaceId = workspaceId;
+    store.targetProject = originalSourceDir || resolvedTargetDir || args.target || '';
+    store.entry = args.entry || 'index.html';
+    store.lastUpdatedAt = new Date().toISOString();
+    if (extra.activeFamousStyle !== undefined) {
+      store.activeFamousStyle = extra.activeFamousStyle;
+    }
+    store.pendingEvents = Array.isArray(store.pendingEvents) ? store.pendingEvents : [];
+    // Coalesce rapid auto-sync events of the same kind so the queue stays concise
+    if (
+      kind === 'live_canvas_edit' &&
+      store.pendingEvents.length > 0 &&
+      store.pendingEvents[store.pendingEvents.length - 1].kind === 'live_canvas_edit'
+    ) {
+      store.pendingEvents[store.pendingEvents.length - 1] = {
+        kind,
+        summary,
+        ts: store.lastUpdatedAt,
+        ...(extra.meta || {})
+      };
+    } else {
+      store.pendingEvents.push({
+        kind,
+        summary,
+        ts: store.lastUpdatedAt,
+        ...(extra.meta || {})
+      });
+      if (store.pendingEvents.length > 25) {
+        store.pendingEvents = store.pendingEvents.slice(-25);
+      }
+    }
+    fs.writeFileSync(LIVE_SYNC_FILE, JSON.stringify(store, null, 2), 'utf8');
+    broadcastSse('live_sync_updated', { workspaceId, store });
+    return store;
+  } catch (_) {
+    return null;
+  }
+}
+
+function createTempPreviewSession({ entry = '', ttlMinutes = 30 } = {}) {
+  const now = Date.now();
+  for (const [tok, rec] of tempPreviewsByToken.entries()) {
+    if (rec.expiresAt <= now) tempPreviewsByToken.delete(tok);
+  }
+  const token = `tmp_${crypto.randomBytes(6).toString('hex')}`;
+  const cleanEntry = codeSync.normalizeRelPath(entry || args.entry || 'index.html') || 'index.html';
+  const ttlMs = Math.min(240, Math.max(2, Number(ttlMinutes) || 30)) * 60 * 1000;
+  const session = {
+    token,
+    workspaceId,
+    targetDir: resolvedTargetDir,
+    entry: cleanEntry,
+    createdAt: now,
+    expiresAt: now + ttlMs
+  };
+  tempPreviewsByToken.set(token, session);
+  return session;
+}
+
+function flushExternalDiskChanges() {
+  if (!resolvedTargetDir || isRemoteTarget) return;
+  const changed = Array.from(pendingExternalChangedPaths);
+  pendingExternalChangedPaths.clear();
+  if (!changed.length) return;
+
+  const snap = readWholeFolderTextMap(resolvedTargetDir, true);
+  broadcastSse('disk_files_changed', {
+    workspaceId,
+    changedFiles: changed,
+    files: snap.files,
+    contents: snap.contents,
+    origins: snap.origins,
+    ts: Date.now()
+  });
+}
+
+function handlePotentialExternalFileChange(relOrAbsPath, forceFromAgent = false) {
+  if (!resolvedTargetDir || isRemoteTarget || !relOrAbsPath) return;
+  const full = path.isAbsolute(relOrAbsPath)
+    ? path.resolve(relOrAbsPath)
+    : path.resolve(resolvedTargetDir, relOrAbsPath);
+  if (!isSubPath(full, resolvedTargetDir)) return;
+  const rel = path.relative(resolvedTargetDir, full).replace(/\\/g, '/');
+  if (!rel || /^(?:\.git|node_modules|dist|_site|\.wrangler|desktop|memory|release|build|\.next)\b/i.test(rel)) return;
+  if (!/\.(?:html?|css|m?js)$/i.test(rel)) return;
+
+  if (!forceFromAgent) {
+    try {
+      if (fs.existsSync(full)) {
+        const st = fs.statSync(full);
+        const lastVc = lastVectoraWriteMtimeByFile.get(full) || 0;
+        const lastSz = lastVectoraWriteSizeByFile.get(full);
+        if (Math.abs(st.mtimeMs - lastVc) < 400 && st.size === lastSz) return; // Ignore Vectora's own exact write!
+      }
+    } catch (_) {}
+  }
+
+  pendingExternalChangedPaths.add(rel);
+  clearTimeout(diskWatchDebounceTimer);
+  diskWatchDebounceTimer = setTimeout(flushExternalDiskChanges, forceFromAgent ? 40 : 110);
+}
+
+function rebindTargetFolderWatcher() {
+  if (activeFolderWatcher) {
+    try { activeFolderWatcher.close(); } catch (_) {}
+    activeFolderWatcher = null;
+  }
+  if (!resolvedTargetDir || isRemoteTarget || !fs.existsSync(resolvedTargetDir)) return;
+  try {
+    activeFolderWatcher = fs.watch(resolvedTargetDir, { recursive: true }, (_eventType, filename) => {
+      if (filename) handlePotentialExternalFileChange(String(filename));
+    });
+    activeFolderWatcher.on('error', () => {});
+  } catch (_) {}
+}
+rebindTargetFolderWatcher();
 
 function ensureWorkspacesSnapshots(relFile, refreshSessionOrigin = false) {
   if (!resolvedTargetDir) return;
@@ -1314,6 +1486,7 @@ const server = http.createServer(async (req, res) => {
         sessionOriginDir = path.join(BACKUP_ROOT, `${workspaceId}_origin`);
         savedBaselineDir = path.join(BACKUP_ROOT, `${workspaceId}_saved`);
         recordWorkspaceBoot();
+        rebindTargetFolderWatcher();
         broadcastSse('target_switched', { target: resolvedTargetDir, entry: args.entry });
         sendJson(res, 200, { ok: true, target: resolvedTargetDir, entry: args.entry, workspaceId });
         return;
@@ -1536,13 +1709,11 @@ const server = http.createServer(async (req, res) => {
         const cleanRel = codeSync.normalizeRelPath(rel);
         if (!cleanRel || outFiles[cleanRel] === undefined) continue;
         const full = path.resolve(resolvedTargetDir, cleanRel);
-        if (!full.startsWith(resolvedTargetDir)) continue;
+        if (!isSubPath(full, resolvedTargetDir)) continue;
         if (fs.existsSync(full)) ensureWorkspacesSnapshots(cleanRel, false);
         fs.mkdirSync(path.dirname(full), { recursive: true });
         fs.writeFileSync(full, String(outFiles[cleanRel]), 'utf8');
-        try {
-          lastVectoraWriteMtimeByFile.set(full, fs.statSync(full).mtimeMs);
-        } catch (_) {}
+        markVectoraOwnWrite(full);
         if (!autoSyncOnly) {
           const savedFile = path.join(savedBaselineDir, cleanRel);
           fs.mkdirSync(path.dirname(savedFile), { recursive: true });
@@ -1555,6 +1726,33 @@ const server = http.createServer(async (req, res) => {
         }
         written.push(cleanRel);
       }
+
+      // Stream live design/style/template sync events immediately to Coding Agents ("sathe sathe")!
+      const pMeta = body.projectMeta || {};
+      if (pMeta.famousStyle !== undefined || body.payload?.famousStyle !== undefined) {
+        const fsSpec = pMeta.famousStyle ?? body.payload?.famousStyle ?? null;
+        recordLiveAgentSyncEvent(
+          autoSyncOnly ? 'famous_style_applied' : 'famous_style_saved',
+          fsSpec
+            ? `Applied Famous Style "${fsSpec.styleName}" (${fsSpec.styleId}) to ${body.entry || args.entry} [${written.join(', ')}]`
+            : `Reset Famous Style back to original project theme on ${body.entry || args.entry}`,
+          { activeFamousStyle: fsSpec, meta: { writtenFiles: written, savedByUser: !autoSyncOnly } }
+        );
+      } else if (pMeta.libraryAction) {
+        recordLiveAgentSyncEvent(
+          pMeta.libraryAction.kind || 'library_insert',
+          `${pMeta.libraryAction.summary || 'Inserted Vectora UI component/template'} in ${body.entry || args.entry} [${written.join(', ')}]`,
+          { meta: { writtenFiles: written, savedByUser: !autoSyncOnly, itemId: pMeta.libraryAction.itemId || '' } }
+        );
+      } else if (written.length > 0) {
+        recordLiveAgentSyncEvent(
+          autoSyncOnly ? 'live_canvas_edit' : 'user_saved_design',
+          `${autoSyncOnly ? 'Live-synced' : 'Saved'} visual canvas updates to [${written.join(', ')}]`,
+          { meta: { writtenFiles: written, savedByUser: !autoSyncOnly } }
+        );
+      }
+      broadcastSse('project_saved', { workspaceId, autoSyncOnly, writtenFiles: written, ts: Date.now() });
+
       sendJson(res, 200, {
         ok: true,
         autoSyncOnly,
@@ -1564,6 +1762,112 @@ const server = http.createServer(async (req, res) => {
         savedAt: Date.now()
       });
       return;
+    }
+
+    if (pathname === '/__vc_api/fs-notify' && req.method === 'POST') {
+      const body = await readJsonBody(req);
+      if (body && body.filePath) {
+        handlePotentialExternalFileChange(String(body.filePath), true);
+      }
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    if (pathname === '/__vc_api/live-sync') {
+      if (req.method === 'GET') {
+        const store = loadLiveSyncStore();
+        if (u.searchParams.get('ack') === '1') {
+          store.pendingEvents = [];
+          store.lastAckAt = new Date().toISOString();
+          fs.writeFileSync(LIVE_SYNC_FILE, JSON.stringify(store, null, 2), 'utf8');
+        }
+        sendJson(res, 200, { ok: true, liveSync: store });
+        return;
+      }
+      if (req.method === 'POST') {
+        const body = await readJsonBody(req);
+        const store = recordLiveAgentSyncEvent(
+          body.kind || 'design_event',
+          body.summary || 'Updated design in Vectora Canvas',
+          { activeFamousStyle: body.activeFamousStyle, meta: body.meta || {} }
+        );
+        sendJson(res, 200, { ok: true, liveSync: store });
+        return;
+      }
+    }
+
+    if (pathname === '/__vc_api/apply-style' && req.method === 'POST') {
+      const body = await readJsonBody(req);
+      const styleId = String(body.styleId || '').trim();
+      const styleObj = designLib.getFamousStyleById(styleId);
+      if (!styleObj && styleId !== 'reset') {
+        sendJson(res, 400, { ok: false, error: `Unknown styleId: ${styleId}` });
+        return;
+      }
+      const famousStyleCss = styleObj ? designLib.compileStyleCss(styleObj.id) : '';
+      const brief = styleObj ? designLib.buildAgentStyleBrief(styleObj.id) : null;
+      if (!isRemoteTarget && resolvedTargetDir) {
+        const snap = readWholeFolderTextMap(resolvedTargetDir, false);
+        const synced = codeSync.applyCanvasPayloadToProject({
+          entry: args.entry || 'index.html',
+          filesMap: snap.contents,
+          originFilesMap: snap.origins,
+          payload: {
+            googleFonts: styleObj ? styleObj.googleFonts : [],
+            famousStyleCss,
+            famousStyle: brief
+          },
+          projectMeta: {}
+        });
+        for (const rel of synced.modifiedFiles) {
+          const full = path.resolve(resolvedTargetDir, rel);
+          if (isSubPath(full, resolvedTargetDir) && synced.filesMap[rel] !== undefined) {
+            fs.writeFileSync(full, String(synced.filesMap[rel]), 'utf8');
+            markVectoraOwnWrite(full);
+          }
+        }
+      }
+      recordLiveAgentSyncEvent(
+        'famous_style_applied',
+        brief ? `Applied Famous Style "${brief.styleName}"` : 'Reset Famous Style',
+        { activeFamousStyle: brief }
+      );
+      broadcastSse('agent_command', { action: 'apply_famous_style', styleId: styleObj ? styleObj.id : 'reset' });
+      sendJson(res, 200, { ok: true, style: brief });
+      return;
+    }
+
+    if (pathname === '/__vc_api/temp-preview') {
+      if (req.method === 'POST') {
+        const body = await readJsonBody(req);
+        const sess = createTempPreviewSession({
+          entry: body.entry || args.entry || 'index.html',
+          ttlMinutes: body.ttlMinutes || 30
+        });
+        const boundPort = server.address()?.port || args.port || 4680;
+        const previewPath = `/__vc_temp/${sess.token}/${sess.entry}`;
+        const previewUrl = `http://127.0.0.1:${boundPort}${previewPath}`;
+        if (body.openBrowser) {
+          openInUserBrowser(previewUrl);
+        }
+        sendJson(res, 200, {
+          ok: true,
+          temporary: true,
+          token: sess.token,
+          entry: sess.entry,
+          previewPath,
+          previewUrl,
+          expiresAt: sess.expiresAt
+        });
+        return;
+      }
+      if (req.method === 'DELETE') {
+        const tok = String(u.searchParams.get('token') || '').trim();
+        if (tok) tempPreviewsByToken.delete(tok);
+        else tempPreviewsByToken.clear();
+        sendJson(res, 200, { ok: true });
+        return;
+      }
     }
 
     if (pathname === '/__vc_api/create-session' && req.method === 'POST') {
@@ -1676,7 +1980,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    if (['/studio.css', '/code-sync.js', '/studio.js', '/bridge.js', '/prebypass.js'].includes(pathname)) {
+    if (['/studio.css', '/code-sync.js', '/design-library.js', '/studio.js', '/bridge.js', '/prebypass.js'].includes(pathname)) {
       serveStaticFile(req, res, path.join(STUDIO_DIR, pathname.slice(1)), false);
       return;
     }
@@ -1691,6 +1995,56 @@ const server = http.createServer(async (req, res) => {
       }
       serveStaticFile(req, res, studioFile, false);
       return;
+    }
+
+    // Ephemeral Temporary Verification Preview Tab (/ __vc_temp/<token>/...)
+    // Clean zero-editor live runtime tab with automatic SSE live-reload when Coding Agent or Vectora edits files!
+    if (pathname.startsWith('/__vc_temp/')) {
+      const rest = pathname.slice('/__vc_temp/'.length);
+      const slashIdx = rest.indexOf('/');
+      const token = slashIdx === -1 ? rest : rest.slice(0, slashIdx);
+      let tempRel = slashIdx === -1 ? '' : rest.slice(slashIdx + 1);
+      const sess = tempPreviewsByToken.get(token);
+      if (!sess || sess.expiresAt <= Date.now()) {
+        tempPreviewsByToken.delete(token);
+        res.writeHead(410, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end('<!doctype html><html><body style="background:#161514;color:#ece9e5;font-family:system-ui;display:grid;place-items:center;height:100vh;margin:0"><div style="text-align:center"><h2 style="margin:0 0 8px">Temporary Preview Expired</h2><p style="color:#a8a29e;margin:0">Click Temp Preview in Vectora Canvas to open a fresh verification tab.</p></div></body></html>');
+        return;
+      }
+      const baseDir = sess.targetDir || resolvedTargetDir;
+      if (!tempRel || tempRel.endsWith('/')) tempRel += sess.entry || args.entry || 'index.html';
+      if (baseDir) {
+        const tempFile = path.resolve(baseDir, tempRel);
+        if (!isSubPath(tempFile, baseDir) || !fs.existsSync(tempFile) || !fs.statSync(tempFile).isFile()) {
+          res.writeHead(404);
+          res.end('Not found');
+          return;
+        }
+        if (/\.html?$/i.test(tempFile)) {
+          let html = fs.readFileSync(tempFile, 'utf8');
+          const liveReloadSnippet = `\n<script data-vc-temp-preview="true">
+(function(){
+  try {
+    var es = new EventSource('/__vc_api/events');
+    var reload = function(){ location.reload(); };
+    es.addEventListener('disk_files_changed', reload);
+    es.addEventListener('project_saved', reload);
+    var pill = document.createElement('div');
+    pill.setAttribute('style','position:fixed;right:12px;bottom:12px;z-index:2147483646;display:inline-flex;align-items:center;gap:7px;padding:5px 10px;border-radius:999px;background:rgba(22,21,20,0.88);border:1px solid rgba(249,115,22,0.45);color:#ece9e5;font:600 11px/1 system-ui,sans-serif;backdrop-filter:blur(10px);box-shadow:0 6px 20px rgba(0,0,0,0.45);');
+    pill.innerHTML = '<span style="width:7px;height:7px;border-radius:50%;background:#f97316;display:inline-block"></span><span>Temp Live Preview</span><button type="button" title="Hide badge" style="background:none;border:none;color:#a8a29e;cursor:pointer;padding:0 0 0 4px;font:700 12px/1 sans-serif">×</button>';
+    pill.querySelector('button').onclick = function(){ pill.remove(); };
+    window.addEventListener('DOMContentLoaded', function(){ document.body && document.body.appendChild(pill); });
+  } catch(_) {}
+})();
+</script>\n`;
+          html = /<\/body>/i.test(html) ? html.replace(/<\/body>/i, `${liveReloadSnippet}</body>`) : html + liveReloadSnippet;
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+          res.end(html, 'utf8');
+          return;
+        }
+        serveStaticFile(req, res, tempFile, false);
+        return;
+      }
     }
 
     // Clean full-page Publish route (serves target HTML, CSS, JS, and assets WITHOUT editor bridge!)
@@ -1766,6 +2120,17 @@ server.listen(args.port, args.host, () => {
   console.log(`[Vectora Canvas] Visual HTML Workspace running at ${url}`);
   console.log(`[Vectora Canvas] Target project: ${resolvedTargetDir || args.target}`);
   console.log(`[Vectora Canvas] Memory: ${MEMORY_FILE}`);
+
+  // When launched inside Antigravity Sidecar (ANTIGRAVITY_SIDECAR_WEB_PORT != 4680),
+  // also bind companion port 4680 on the exact same live server if 4680 is free, so CLI/MCP and Sidecar share 100% live state!
+  if (args.isSidecar && boundPort !== 4680) {
+    const mirrorServer = http.createServer(server.listeners('request')[0]);
+    mirrorServer.on('error', () => {});
+    mirrorServer.listen(4680, '127.0.0.1', () => {
+      console.log(`[Vectora Canvas] Companion CLI/MCP mirror bound at http://127.0.0.1:4680`);
+    });
+  }
+
   if (args.open) {
     openInUserBrowser(url);
   }
